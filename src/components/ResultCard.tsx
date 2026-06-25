@@ -1,5 +1,5 @@
 import { Loader2, CheckCircle2, AlertTriangle, XCircle, ExternalLink, Mail, Phone, User, Briefcase, Clock } from "lucide-react";
-import type { ProspectResult, Hierarquia } from "@/lib/prospect.server";
+import type { ProspectResult, Hierarquia } from "@/lib/prospect.types";
 
 export type CardState =
   | { phase: "searching" }

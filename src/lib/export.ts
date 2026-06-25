@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { ProspectResult } from "./prospect.server";
+import type { ProspectResult } from "./prospect.types";
 
 export type ExportRow = {
   municipio: string;

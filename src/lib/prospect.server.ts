@@ -2,20 +2,9 @@ import Firecrawl from "@mendable/firecrawl-js";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
+import type { Hierarquia, ProspectResult } from "./prospect.types";
 
-export type Hierarquia = "educacao" | "geral" | "gabinete";
-
-export type ProspectResult = {
-  status: "found" | "partial" | "not_found";
-  hierarquia: Hierarquia | null;
-  secretario: string | null;
-  cargo: string | null;
-  emails: string[];
-  telefones: string[];
-  fonte: string | null;
-  fonteUrl: string | null;
-  contexto: string | null;
-};
+export type { Hierarquia, ProspectResult };
 
 const ExtractSchema = z.object({
   secretario: z.string().nullable().describe("Nome completo do secretário ou responsável; null se não encontrado"),
