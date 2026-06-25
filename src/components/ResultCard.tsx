@@ -200,6 +200,11 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
                       via Diário Oficial
                     </span>
                   )}
+                  {result.nomeFonte === "snippet" && (
+                    <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-700">
+                      via snippet do Google
+                    </span>
+                  )}
                 </span>
               }
             />
