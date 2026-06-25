@@ -230,7 +230,7 @@ export async function prospectar(
     onEvent?.({
       kind: "progress",
       level,
-      etapa: etapa as ProgressEvent extends { etapa: infer E } ? E : never,
+      etapa,
       message,
       data,
       ts: Date.now(),
