@@ -468,6 +468,7 @@ export async function prospectar(
   // ===== ESTÁGIO A: descobrir o NOME =====
   let nomeSecretario: string | null = null;
   let nomeFonte: "diario" | "site" | "busca-nome" | "snippet" | null = null;
+  let dataReferenciaGlobal: string | null = null;
   let urlSiteEducacao: string | null = null;
   let mdSiteEducacao: string | null = null;
   let extraConfirmado: Extracted | null = null; // se já veio contato no site institucional
@@ -476,12 +477,12 @@ export async function prospectar(
   let diarioExcerpts: DiarioExcerpt[] = [];
   let diarioPromise: Promise<void> = Promise.resolve();
   if (ibgeId) {
-    emit("info", "diario", `Consultando Querido Diário (cód. IBGE ${ibgeId})...`);
+    emit("info", "diario", `Consultando Querido Diário (cód. IBGE ${ibgeId}, últimos 6 meses)...`);
     diarioPromise = (async () => {
       const r = await buscarDiario(
         ibgeId,
         '"secretário de educação" OR "secretária de educação" OR "secretario municipal de educação"',
-        { size: 5, sinceDays: 730 },
+        { size: 5, sinceDays: 180 },
       );
       if (!r.ok) {
         emit("warn", "diario", `Diário Oficial indisponível (${r.reason}) — seguindo sem ele`);
@@ -495,28 +496,70 @@ export async function prospectar(
       emit(
         "success",
         "diario",
-        `Encontrei ${r.excerpts.length} trecho(s) no diário oficial`,
+        `Encontrei ${r.excerpts.length} trecho(s) no diário (mais novo: ${r.excerpts[0]?.data || "?"})`,
         { excerpts: r.excerpts.slice(0, 3) },
       );
       const cand = nomeDoDiario(r.excerpts);
       if (cand) {
-        nomeSecretario = cand;
-        nomeFonte = "diario";
-        emit("success", "diario", `Pista forte do diário: nome provável = ${cand}`);
+        // Só adota como nomeFonte=diario se for ≤ 365 dias (1 ano).
+        if (cand.ageDays <= 365) {
+          nomeSecretario = cand.nome;
+          nomeFonte = "diario";
+          dataReferenciaGlobal = cand.data || null;
+          emit(
+            "success",
+            "diario",
+            `Pista forte do diário (${cand.data}, há ~${Math.floor(cand.ageDays / 30)} meses): nome provável = ${cand.nome}`,
+          );
+          if (cand.conflito) {
+            emit(
+              "warn",
+              "nome",
+              `Conflito no diário: trecho mais antigo cita "${cand.conflito}" — adotando "${cand.nome}" (mais recente)`,
+            );
+          }
+        } else {
+          emit(
+            "warn",
+            "diario",
+            `Trecho do diário é antigo (${cand.data}, ~${Math.floor(cand.ageDays / 30)} meses) — vou tratar como pista fraca e exigir confirmação`,
+          );
+        }
       }
     })();
   } else {
     emit("info", "diario", "Sem código IBGE — pulando consulta ao Querido Diário");
   }
 
-  // A2: busca + scrape (em batch) do site oficial da Educação
-  emit("info", "nome", "Estágio A — descobrindo o nome do(a) Secretário(a) de Educação");
-  const candsA = await searchCandidates(
-    fc,
-    `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário nome contato`,
-    emit,
-    "nome",
-  );
+  // A2: busca + scrape (em batch) do site oficial da Educação — 3 queries focando atualidade
+  emit("info", "nome", "Estágio A — descobrindo o nome ATUAL do(a) Secretário(a) de Educação");
+  const anoAtual = new Date().getFullYear();
+  const [candsA1, candsA2, candsA3] = await Promise.all([
+    searchCandidates(
+      fc,
+      `"secretário de educação" ${municipio} ${uf} ${anoAtual}`,
+      emit,
+      "nome",
+      true,
+      "qdr:y",
+    ),
+    searchCandidates(
+      fc,
+      `secretaria municipal educação ${municipio} ${uf} "atual" OR "nomeado" OR "empossado"`,
+      emit,
+      "nome",
+      true,
+      "qdr:y",
+    ),
+    searchCandidates(
+      fc,
+      `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário nome contato`,
+      emit,
+      "nome",
+    ),
+  ]);
+  const candsA = dedupeCandidates([candsA1, candsA2, candsA3]);
+  emit("info", "nome", `Após dedupe: ${candsA.length} candidato(s) únicos das 3 buscas`);
   const rankedA = preferGov(candsA, (u) => /(educa|secretari)/i.test(u));
   const topA = rankedA[0] ?? null;
   urlSiteEducacao = topA?.url ?? null;
