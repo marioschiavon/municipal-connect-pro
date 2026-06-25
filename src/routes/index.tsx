@@ -157,6 +157,38 @@ function Index() {
         continue;
       }
 
+      // === CACHE: tentar servir do localStorage antes de bater na rede ===
+      if (!forceRefresh) {
+        const cached = getCached(m.id);
+        if (cached) {
+          const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
+          const cacheEvt: ProgressEvent = {
+            kind: "progress",
+            level: "success",
+            etapa: "init",
+            message: `Cache local: resultado de ${cached.date} (há ${ageMin} min) — sem nova consulta`,
+            data: { savedAt: cached.savedAt },
+            ts: Date.now(),
+          };
+          const finalEvt: ProgressEvent = {
+            kind: "final",
+            result: cached.result,
+            ts: Date.now(),
+          };
+          logDebug("success", scope, cacheEvt.message);
+          patchCard(key, (c) => ({
+            ...c,
+            state: {
+              phase: "done",
+              result: cached.result,
+              events: [...c.state.events, cacheEvt, finalEvt],
+            },
+            slow: false,
+          }));
+          continue;
+        }
+      }
+
       slowTimers.current[key] = window.setTimeout(() => {
         patchCard(key, (c) => ({ ...c, slow: true }));
       }, 45000);
@@ -187,6 +219,15 @@ function Index() {
               `Final: ${evt.result.status} (${evt.result.fonte ?? "—"})`,
               evt.result,
             );
+            // Salva no cache local (somente resultados não-vazios)
+            if (evt.result.status !== "not_found") {
+              try {
+                setCached(m.id, m.nome, m.uf, evt.result);
+                setCacheCount(listCached().length);
+              } catch (e) {
+                console.warn("Falha ao salvar cache", e);
+              }
+            }
             patchCard(key, (c) => ({
               ...c,
               state: { phase: "done", result: evt.result, events: [...c.state.events, evt] },
