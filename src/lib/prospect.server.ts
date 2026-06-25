@@ -215,17 +215,19 @@ ${hintsBlock}
 Conteúdo (markdown):
 """
 ${markdown}
-"""`;
+"""
+
+Responda APENAS com JSON válido seguindo o schema. Sem comentários, sem markdown, sem \`\`\`json.`;
   emit("info", etapa, "Pedindo para a IA extrair os contatos desta página...", {
     pistas: hints,
   });
   try {
-    const { experimental_output } = await generateText({
+    const { object } = await generateObject({
       model: provider("google/gemini-3-flash-preview"),
-      experimental_output: Output.object({ schema: ExtractSchema }),
+      schema: ExtractSchema,
       prompt,
     });
-    const out = experimental_output as Extracted;
+    const out = object as Extracted;
     emit(
       out.confianca === "baixa" ? "warn" : "success",
       etapa,
@@ -234,7 +236,25 @@ ${markdown}
     );
     return out;
   } catch (e) {
-    emit("error", etapa, "Erro na chamada da IA", String(e));
+    const err = e as { message?: string; cause?: { message?: string }; text?: string };
+    emit("error", etapa, "Erro na IA: schema não bateu — usando regex como fallback", {
+      message: err?.message,
+      cause: err?.cause?.message,
+      rawText: err?.text?.slice(0, 500),
+    });
+    // Fallback de emergência: aproveita o que o regex já achou na página.
+    if (hints.emails.length || hints.telefones.length) {
+      const fallback: Extracted = {
+        secretario: null,
+        cargo: null,
+        emails: hints.emails.slice(0, 5),
+        telefones: hints.telefones.slice(0, 5),
+        contexto: "IA falhou — contatos extraídos por regex da página",
+        confianca: "baixa",
+      };
+      emit("warn", etapa, `Regex recuperou ${fallback.emails.length} e-mail(s) e ${fallback.telefones.length} tel`, fallback);
+      return fallback;
+    }
     return null;
   }
 }
