@@ -553,10 +553,11 @@ export async function prospectar(
   }
 
   // Se ainda não temos nome E temos conteúdo, faz extração focada em nome
-  if (!nomeSecretario && combinedA && urlSiteEducacao) {
+  if (!nomeSecretario && combinedA) {
+    const urlForName = urlSiteEducacao ?? topA?.url ?? "(snippets do Google)";
     const n = await extractNomeWithAI(
       combinedA,
-      urlSiteEducacao,
+      urlForName,
       municipio,
       uf,
       diarioBlock,
@@ -564,7 +565,7 @@ export async function prospectar(
     );
     if (n?.secretario) {
       nomeSecretario = n.secretario;
-      nomeFonte = inlineMdA && !mdSiteEducacao ? "snippet" : "site";
+      nomeFonte = onlySnippets ? "snippet" : "site";
     }
   }
 
