@@ -1,82 +1,78 @@
-
 ## Objetivo
+1. Reduzir custo/dependência do Firecrawl no scrape, mantendo-o só para a busca e como rede de segurança quando o fetch nativo falhar.
+2. Introduzir versionamento automático visível no badge do cabeçalho.
 
-1. Mostrar **em tempo real**, dentro de cada card de município, uma "trilha" de mensagens curtas em primeira pessoa do que o bot está fazendo ("Buscando site da prefeitura...", "Encontrei pmexemplo.sp.gov.br", "Lendo a página da Secretaria de Educação...", "Achei o nome do secretário: Fulano", "Só encontrei e-mail, sem telefone — caindo pro fallback", etc.).
-2. Espelhar **tudo isso** na tela `/debug` (não só logs do IBGE) — fetch do Firecrawl, URL escolhida, tamanho do markdown, retorno da IA, decisão de fallback, erros.
-3. Reforçar nas instruções da IA e na lógica de servidor o **alvo + ordem de fallback**:
-   - **Alvo**: Secretaria Municipal de Educação — nome do(a) secretário(a) + e-mails/telefones dela.
-   - **Fallback 1**: e-mail/telefone institucional geral da prefeitura (ouvidoria, fale conosco, secretaria geral).
-   - **Fallback 2**: contato do gabinete do prefeito (ou do próprio prefeito).
-   - Nunca inventar dados; só extrair o que aparece literalmente.
+---
 
-## Mudanças
+## Parte 1 — Scraper próprio
 
-### 1. Endpoint de streaming (servidor)
+### 1.1 Novo módulo `src/lib/scraper.server.ts`
+Scraper rodando no Worker (fetch nativo + parsing puro, sem deps novas):
 
-Trocar `prospectarMunicipio` (server function) por uma **server route** em `src/routes/api/prospect.ts` que devolve um stream NDJSON (`application/x-ndjson`).
+- `fetchHtml(url, { timeoutMs, emit })`: `fetch` com `AbortController` (timeout 12s), `User-Agent` de navegador, `Accept-Language: pt-BR`, segue até 5 redirects manualmente, valida `content-type` text/html, lê no máx. ~1.5MB.
+- `htmlToMarkdown(html)`: pipeline em regex —
+  - remove `<script>`, `<style>`, `<noscript>`, comentários
+  - extrai `<title>` e `<meta name="description">` num header
+  - converte `<a href>` → `[texto](href)` (preserva mailto/tel)
+  - converte `<br>`, `<p>`, `<li>`, `<h1-6>` em quebras/marcadores
+  - decodifica entidades HTML
+  - colapsa whitespace, limita a ~25k chars
+- `extractContactsRegex(text)`: extra — captura e-mails e telefones BR, devolve listas únicas pra IA cruzar.
 
-- Mantém o `prospect.server.ts`, mas refatora `prospectar(municipio, uf)` para receber um `onEvent(evt)` callback e emitir eventos em pontos-chave:
-  - `stage_start` (etapa: educacao/geral/gabinete) com mensagem amigável
-  - `search_query` (query enviada ao Firecrawl)
-  - `search_result` (URL escolhida + nº de candidatos)
-  - `scrape_start` / `scrape_done` (tamanho do markdown)
-  - `ai_start` / `ai_done` (resumo: secretario, nº de emails/telefones, confiança)
-  - `stage_decision` ("contato útil encontrado, parando" vs. "insuficiente, indo para fallback X")
-  - `final` (resultado completo)
-  - `error` (mensagem)
-- A rota encadeia os eventos para o client e termina com o `ProspectResult` final.
+Compatível com Workers — sem `cheerio`/`jsdom`.
 
-### 2. Cliente consumindo o stream
+### 1.2 Atualizar `src/lib/prospect.server.ts`
+Em `scrapeMarkdown(fc, url, emit, etapa)`:
+1. Emite `scrape_start`.
+2. Tenta `fetchHtml` + `htmlToMarkdown`.
+   - Sucesso (markdown ≥ 200 chars úteis): emite `scrape_done { via: "native", bytes }` e retorna.
+   - Falha (timeout, status≠2xx, content-type errado, markdown vazio, exceção): emite `scrape_fallback { reason }` e cai pro Firecrawl atual.
+3. `searchFirstUrl` (Firecrawl `search`) permanece intacto.
 
-`src/routes/index.tsx`: substituir `useServerFn(prospectarMunicipio)` por um `fetch('/api/prospect', { body: JSON.stringify({ municipio, uf }) })` que lê o `ReadableStream`, parseia linha-a-linha e:
+Pistas do regex anexadas ao prompt da IA pra reduzir alucinação; schema de saída inalterado.
 
-- empilha cada evento em `card.events: ProgressEvent[]` (novo campo em `RunningCard`);
-- ao receber `final`, troca o card pra `phase: 'done'`;
-- também chama `logDebug(...)` pra cada evento, com `scope` igual a `prospect:<municipio>` — assim a tela `/debug` mostra o fluxo completo.
+### 1.3 UI/Debug
+- `ResultCard` timeline: "Baixando página direto…", "Página baixada (12 KB)", "Bloqueado, usando Firecrawl…".
+- `/debug` recebe os eventos via `logDebug` automaticamente.
+- Sem mudança em `ProspectResult` nem na exportação.
 
-### 3. `ResultCard` com timeline ao vivo
+---
 
-Adicionar, abaixo do header do card e enquanto `phase !== 'done'`, uma lista vertical compacta dos últimos ~6 eventos:
-- ícone por tipo (lupa, globo, cérebro, check, alerta)
-- texto curto em português (vem do servidor)
-- timestamp relativo ("agora", "2s atrás")
-- quando vira `done`, a timeline some (ou colapsa atrás de um `<details>Ver passos</details>`).
+## Parte 2 — Versionamento automático
 
-### 4. Regras de extração reforçadas (`prospect.server.ts`)
-
-Reescrever o prompt da IA pra deixar claro:
-
+### 2.1 Novo arquivo `src/lib/version.ts`
+```ts
+export const APP_VERSION = "Alpha v0.2";
 ```
-ALVO PRINCIPAL: Secretaria Municipal de Educação de {municipio}/{uf}.
-  Queremos: nome do(a) Secretário(a) de Educação + e-mails e telefones DELA / DA SECRETARIA.
+Fonte única usada pelo header e pelo `/debug`. **Regra fixa: nunca bumpar para `v1.0` sem autorização explícita do usuário.** Comentário no topo do arquivo deixa isso explícito.
 
-Se o conteúdo desta página não for da Educação, ou não trouxer contato dela:
-  - Etapa "geral": aceite e-mail/telefone institucional da prefeitura (ouvidoria, fale-conosco, secretaria geral).
-  - Etapa "gabinete": aceite contato do gabinete do prefeito ou do próprio prefeito.
+### 2.2 Política de bump
+A cada turno que envolver alteração funcional de código (não conta correção de typo/comentário), o agente incrementa o patch:
+- `Alpha v0.1` → `Alpha v0.2` → `Alpha v0.3` → … `Alpha v0.9` → `Alpha v0.10` → `Alpha v0.11` …
+- Permanece `Alpha` indefinidamente.
+- Transição para `v1.0` (ou Beta) **só sob comando explícito** do usuário.
 
-NUNCA invente. Só extraia o que aparece literalmente no texto.
-Marque confianca="alta" só quando o alvo da etapa estiver claramente identificado.
-```
+Esta entrega já bumpa para **`Alpha v0.2`** (scraper próprio).
 
-Ajustar também os badges/labels do card pra refletir essa hierarquia ("Contato direto da Educação" / "Contato geral da prefeitura" / "Gabinete do prefeito — último recurso").
+### 2.3 Consumo
+- `src/routes/index.tsx`: badge no header passa a importar `APP_VERSION` em vez de string literal.
+- `src/routes/debug.tsx`: mostra a versão atual no topo da tela de debug.
 
-### 5. Tipos
+### 2.4 Memória
+Salvar em `mem://constraints/versioning.md` a regra "nunca subir para v1.0 sem autorização" + a regra de bump por turno funcional, e referenciar no `mem://index.md` (Core).
 
-- `src/lib/prospect.types.ts`: adicionar `ProgressEvent` (discriminated union dos tipos acima).
-- `RunningCard.events: ProgressEvent[]` no `index.tsx`.
+---
 
-## Arquivos tocados
+## Arquivos
+- **novo**: `src/lib/scraper.server.ts`
+- **novo**: `src/lib/version.ts`
+- **novo**: `mem://constraints/versioning.md` + update `mem://index.md`
+- **edit**: `src/lib/prospect.server.ts` (só `scrapeMarkdown` + emits)
+- **edit**: `src/components/ResultCard.tsx` (rótulos dos novos eventos)
+- **edit**: `src/routes/index.tsx` (importa `APP_VERSION`)
+- **edit**: `src/routes/debug.tsx` (mostra `APP_VERSION`)
 
-- `src/lib/prospect.types.ts` — adicionar `ProgressEvent`.
-- `src/lib/prospect.server.ts` — assinatura com `onEvent`, prompts reforçados, emissões em cada etapa.
-- `src/routes/api/prospect.ts` — **novo**, server route NDJSON streaming.
-- `src/lib/prospect.functions.ts` — remover (ou manter como wrapper não-streaming).
-- `src/routes/index.tsx` — consumir stream, alimentar `events` + `debug-log`.
-- `src/components/ResultCard.tsx` — timeline ao vivo.
-- `src/lib/debug-log.ts` — sem mudanças (já é genérico).
-- `src/routes/debug.tsx` — sem mudanças estruturais; ganha eventos de prospecção "de graça".
-
-## Fora do escopo
-
-- Persistência dos logs entre reloads.
-- Cancelamento de busca em andamento (pode ser próximo passo).
+## Riscos
+- Sites `.gov.br` com Cloudflare/anti-bot retornam 403 → cai pro Firecrawl (esperado).
+- HTML→Markdown por regex perde tabelas complexas; aceitável pro alvo (e-mails/telefones).
+- SPAs sem conteúdo no HTML inicial → markdown vazio → fallback Firecrawl.

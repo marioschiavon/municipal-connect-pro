@@ -2,6 +2,7 @@ import Firecrawl from "@mendable/firecrawl-js";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
+import { fetchHtml, htmlToMarkdown, extractContactsRegex } from "./scraper.server";
 import type {
   Hierarquia,
   ProgressEvent,
@@ -103,7 +104,33 @@ async function scrapeMarkdown(
   emit: Emit,
   etapa: Hierarquia,
 ): Promise<string | null> {
-  emit("info", etapa, `Lendo a página ${shortHost(url)} (scrape)...`);
+  // 1) Tentativa nativa: fetch + parser próprio (rápido, sem custo).
+  emit("info", etapa, `Baixando ${shortHost(url)} direto (fetch nativo)...`);
+  const native = await fetchHtml(url, {
+    emit: (msg, data) => emit("info", etapa, msg, data),
+  });
+  if (native.ok) {
+    const md = htmlToMarkdown(native.html);
+    const useful = md.replace(/\s+/g, " ").trim();
+    if (useful.length >= 200) {
+      const kb = (native.bytes / 1024).toFixed(1);
+      emit(
+        "success",
+        etapa,
+        `Página baixada direto (${kb} KB → ${md.length.toLocaleString("pt-BR")} chars markdown)`,
+        { via: "native", bytes: native.bytes, finalUrl: native.finalUrl },
+      );
+      return md;
+    }
+    emit("warn", etapa, "HTML nativo veio vazio/curto — usando Firecrawl como fallback", {
+      length: useful.length,
+    });
+  } else {
+    emit("warn", etapa, `Fetch nativo falhou (${native.reason}) — caindo pro Firecrawl`);
+  }
+
+  // 2) Fallback: Firecrawl.
+  emit("info", etapa, `Lendo a página ${shortHost(url)} via Firecrawl...`);
   try {
     const res = await fc.scrape(url, {
       formats: ["markdown"],
@@ -114,10 +141,15 @@ async function scrapeMarkdown(
       (res as { data?: { markdown?: string } }).data?.markdown ??
       null;
     if (!md || md.length < 50) {
-      emit("warn", etapa, "Página vazia ou muito curta", { length: md?.length ?? 0 });
+      emit("warn", etapa, "Página vazia ou muito curta (Firecrawl)", { length: md?.length ?? 0 });
       return md && md.length > 50 ? md : null;
     }
-    emit("success", etapa, `Página lida (${md.length.toLocaleString("pt-BR")} caracteres)`);
+    emit(
+      "success",
+      etapa,
+      `Página lida via Firecrawl (${md.length.toLocaleString("pt-BR")} caracteres)`,
+      { via: "firecrawl" },
+    );
     return md.slice(0, 18000);
   } catch (e) {
     emit("error", etapa, "Erro no scrape do Firecrawl", String(e));
@@ -142,6 +174,12 @@ async function extractWithAI(
         ? "Contato institucional GERAL da prefeitura (ouvidoria, fale-conosco, secretaria geral, telefone/e-mail principal)."
         : "Contato do Gabinete do Prefeito ou do próprio Prefeito (último recurso).";
 
+  const hints = extractContactsRegex(markdown);
+  const hintsBlock =
+    hints.emails.length || hints.telefones.length
+      ? `\nPISTAS pré-extraídas por regex (use SOMENTE se também aparecerem no conteúdo abaixo, e descarte falsos positivos):\n  e-mails: ${hints.emails.join(", ") || "—"}\n  telefones: ${hints.telefones.join(", ") || "—"}\n`
+      : "";
+
   const prompt = `Você é um analista que extrai contatos institucionais de páginas oficiais da prefeitura de ${municipio}/${uf}.
 
 ALVO PRINCIPAL DO PROJETO:
@@ -164,12 +202,14 @@ REGRAS RÍGIDAS:
 - Se a página claramente não traz nada útil para esta etapa, devolva arrays vazios e confianca = "baixa".
 
 URL analisada: ${url}
-
+${hintsBlock}
 Conteúdo (markdown):
 """
 ${markdown}
 """`;
-  emit("info", etapa, "Pedindo para a IA extrair os contatos desta página...");
+  emit("info", etapa, "Pedindo para a IA extrair os contatos desta página...", {
+    pistas: hints,
+  });
   try {
     const { experimental_output } = await generateText({
       model: provider("google/gemini-3-flash-preview"),

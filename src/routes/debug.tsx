@@ -9,6 +9,7 @@ import {
   type DebugEntry,
 } from "@/lib/debug-log";
 import { loadMunicipios } from "@/lib/ibge";
+import { APP_VERSION } from "@/lib/version";
 
 export const Route = createFileRoute("/debug")({
   head: () => ({
@@ -47,6 +48,9 @@ function DebugPage() {
               <ArrowLeft className="h-4 w-4" />
             </Link>
             <h1 className="text-lg font-semibold">Debug · MunicipIA</h1>
+            <span className="rounded border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-mono uppercase text-slate-600">
+              {APP_VERSION}
+            </span>
             <span className="rounded border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-mono uppercase text-slate-600">
               {entries.length} eventos
             </span>
