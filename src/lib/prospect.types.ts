@@ -11,7 +11,7 @@ export type ProspectResult = {
   fonteUrl: string | null;
   contexto: string | null;
   /** Origem do NOME do secretário, quando aplicável. */
-  nomeFonte?: "site" | "diario" | "busca-nome" | null;
+  nomeFonte?: "site" | "diario" | "busca-nome" | "snippet" | null;
 };
 
 export type ProgressLevel = "info" | "success" | "warn" | "error";
