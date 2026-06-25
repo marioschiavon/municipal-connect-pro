@@ -20,7 +20,8 @@ export type CardState =
   | { phase: "searching"; events: ProgressEvent[] }
   | { phase: "analyzing"; events: ProgressEvent[] }
   | { phase: "done"; result: ProspectResult; events: ProgressEvent[] }
-  | { phase: "error"; error: string; events: ProgressEvent[] };
+  | { phase: "error"; error: string; events: ProgressEvent[] }
+  | { phase: "canceled"; events: ProgressEvent[] };
 
 type Props = {
   municipio: string;
