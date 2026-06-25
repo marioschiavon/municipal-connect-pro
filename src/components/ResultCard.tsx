@@ -20,7 +20,8 @@ export type CardState =
   | { phase: "searching"; events: ProgressEvent[] }
   | { phase: "analyzing"; events: ProgressEvent[] }
   | { phase: "done"; result: ProspectResult; events: ProgressEvent[] }
-  | { phase: "error"; error: string; events: ProgressEvent[] };
+  | { phase: "error"; error: string; events: ProgressEvent[] }
+  | { phase: "canceled"; events: ProgressEvent[] };
 
 type Props = {
   municipio: string;
@@ -64,6 +65,12 @@ function StatusPill({ state }: { state: CardState }) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700">
         <XCircle className="h-3 w-3" /> Erro
+      </span>
+    );
+  if (state.phase === "canceled")
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+        <XCircle className="h-3 w-3" /> Cancelado
       </span>
     );
   const r = state.result;
@@ -169,6 +176,12 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
 
       {state.phase === "error" && (
         <p className="mt-3 text-sm text-red-700">{state.error}</p>
+      )}
+
+      {state.phase === "canceled" && (
+        <p className="mt-3 text-sm text-slate-600">
+          Busca cancelada pelo usuário antes da conclusão.
+        </p>
       )}
 
       <Timeline events={state.events} live={live} />

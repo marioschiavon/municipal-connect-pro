@@ -42,12 +42,14 @@ type RunningCard = {
 async function streamProspect(
   municipio: string,
   uf: string,
+  signal: AbortSignal,
   onEvent: (evt: ProgressEvent) => void,
 ): Promise<ProspectResult | null> {
   const res = await fetch("/api/prospect", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ municipio, uf }),
+    signal,
   });
   if (!res.ok || !res.body) {
     throw new Error(`HTTP ${res.status}`);
@@ -82,10 +84,13 @@ function Index() {
   const [cards, setCards] = useState<RunningCard[]>([]);
   const [running, setRunning] = useState(false);
   const slowTimers = useRef<Record<string, number>>({});
+  const abortRef = useRef<AbortController | null>(null);
+  const canceledRef = useRef(false);
 
   useEffect(() => {
     return () => {
       Object.values(slowTimers.current).forEach((t) => window.clearTimeout(t));
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -108,8 +113,18 @@ function Index() {
     setCards((prev) => prev.map((c) => (c.key === key ? fn(c) : c)));
   }
 
+  function cancelSearch() {
+    if (!running) return;
+    canceledRef.current = true;
+    abortRef.current?.abort();
+    logDebug("warn", "prospect", "Busca cancelada pelo usuário");
+  }
+
   async function startSearch() {
     if (selected.length === 0 || running) return;
+    canceledRef.current = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setRunning(true);
     const initial: RunningCard[] = selected.map((m) => ({
       key: `${m.id}`,
@@ -123,17 +138,26 @@ function Index() {
     for (const m of selected) {
       const key = `${m.id}`;
       const scope = `prospect:${m.nome}/${m.uf}`;
+
+      if (canceledRef.current) {
+        patchCard(key, (c) =>
+          c.state.phase === "done" || c.state.phase === "error"
+            ? c
+            : { ...c, state: { phase: "canceled", events: c.state.events }, slow: false },
+        );
+        continue;
+      }
+
       slowTimers.current[key] = window.setTimeout(() => {
         patchCard(key, (c) => ({ ...c, slow: true }));
       }, 45000);
 
       try {
-        const result = await streamProspect(m.nome, m.uf, (evt) => {
+        const result = await streamProspect(m.nome, m.uf, controller.signal, (evt) => {
           if (evt.kind === "progress") {
             logDebug(evt.level, scope, evt.message, evt.data);
             patchCard(key, (c) => {
               const events = [...c.state.events, evt];
-              // first non-init event flips to "analyzing"
               const phase =
                 c.state.phase === "searching" && evt.etapa !== "init"
                   ? ("analyzing" as const)
@@ -161,26 +185,44 @@ function Index() {
             }));
           }
         });
-        if (!result) {
+        if (!result && !canceledRef.current) {
+          patchCard(key, (c) =>
+            c.state.phase === "done"
+              ? c
+              : {
+                  ...c,
+                  state: { phase: "error", error: "Sem resposta final do servidor", events: c.state.events },
+                  slow: false,
+                },
+          );
+        }
+      } catch (err) {
+        const aborted =
+          canceledRef.current ||
+          (err instanceof DOMException && err.name === "AbortError") ||
+          (err instanceof Error && /abort/i.test(err.message));
+        if (aborted) {
+          logDebug("warn", scope, "Busca interrompida");
+          patchCard(key, (c) =>
+            c.state.phase === "done"
+              ? c
+              : { ...c, state: { phase: "canceled", events: c.state.events }, slow: false },
+          );
+        } else {
+          const message = err instanceof Error ? err.message : "Falha ao buscar";
+          logDebug("error", scope, "Falha no stream", message);
           patchCard(key, (c) => ({
             ...c,
-            state: { phase: "error", error: "Sem resposta final do servidor", events: c.state.events },
+            state: { phase: "error", error: message, events: c.state.events },
             slow: false,
           }));
         }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Falha ao buscar";
-        logDebug("error", scope, "Falha no stream", message);
-        patchCard(key, (c) => ({
-          ...c,
-          state: { phase: "error", error: message, events: c.state.events },
-          slow: false,
-        }));
       } finally {
         window.clearTimeout(slowTimers.current[key]);
       }
     }
 
+    abortRef.current = null;
     setRunning(false);
   }
 
@@ -266,14 +308,25 @@ function Index() {
             )}
 
             <div className="mt-5 flex flex-col gap-2">
-              <Button
-                onClick={startSearch}
-                disabled={selected.length === 0 || running}
-                className="w-full"
-              >
-                <Search className="mr-2 h-4 w-4" />
-                {running ? "Buscando..." : "Iniciar busca"}
-              </Button>
+              {running ? (
+                <Button
+                  onClick={cancelSearch}
+                  variant="destructive"
+                  className="w-full"
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  Cancelar busca
+                </Button>
+              ) : (
+                <Button
+                  onClick={startSearch}
+                  disabled={selected.length === 0}
+                  className="w-full"
+                >
+                  <Search className="mr-2 h-4 w-4" />
+                  Iniciar busca
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 onClick={clearAll}
@@ -284,6 +337,7 @@ function Index() {
                 Limpar tudo
               </Button>
             </div>
+
           </div>
 
           <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs leading-relaxed text-slate-600">
