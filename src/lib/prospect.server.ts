@@ -770,6 +770,7 @@ export async function prospectar(
       fonteUrl: urlSiteEducacao,
       contexto: extraConfirmado.contexto ?? "Contato institucional da Secretaria (sem vínculo direto com a pessoa).",
       nomeFonte,
+      dataReferencia: extraConfirmado.dataReferencia ?? dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
