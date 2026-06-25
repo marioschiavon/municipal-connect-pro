@@ -11,3 +11,20 @@ export type ProspectResult = {
   fonteUrl: string | null;
   contexto: string | null;
 };
+
+export type ProgressLevel = "info" | "success" | "warn" | "error";
+
+export type ProgressEvent =
+  | {
+      kind: "progress";
+      level: ProgressLevel;
+      etapa: Hierarquia | "init" | "fallback" | "final";
+      message: string;
+      data?: unknown;
+      ts: number;
+    }
+  | {
+      kind: "final";
+      result: ProspectResult;
+      ts: number;
+    };

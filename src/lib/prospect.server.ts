@@ -2,20 +2,43 @@ import Firecrawl from "@mendable/firecrawl-js";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import { createLovableAiGatewayProvider } from "./ai-gateway.server";
-import type { Hierarquia, ProspectResult } from "./prospect.types";
+import type {
+  Hierarquia,
+  ProgressEvent,
+  ProgressLevel,
+  ProspectResult,
+} from "./prospect.types";
 
 export type { Hierarquia, ProspectResult };
 
 const ExtractSchema = z.object({
-  secretario: z.string().nullable().describe("Nome completo do secretário ou responsável; null se não encontrado"),
+  secretario: z
+    .string()
+    .nullable()
+    .describe("Nome completo do(a) secretário(a) de Educação, se aparecer literalmente; senão null"),
   cargo: z.string().nullable().describe("Cargo/título exato encontrado; null se não encontrado"),
-  emails: z.array(z.string()).describe("E-mails de contato encontrados"),
-  telefones: z.array(z.string()).describe("Telefones de contato encontrados"),
-  contexto: z.string().nullable().describe("Breve nota explicando o que foi encontrado (1 frase)"),
-  confianca: z.enum(["alta", "media", "baixa"]).describe("Quão confiante você está nos dados extraídos"),
+  emails: z.array(z.string()).describe("E-mails de contato encontrados (literalmente no texto)"),
+  telefones: z
+    .array(z.string())
+    .describe("Telefones de contato encontrados (literalmente, formato brasileiro)"),
+  contexto: z
+    .string()
+    .nullable()
+    .describe("1 frase explicando o que foi achado (ex.: 'E-mail institucional da SEMED')"),
+  confianca: z.enum(["alta", "media", "baixa"]).describe("Quão confiante você está nos dados"),
 });
 
 type Extracted = z.infer<typeof ExtractSchema>;
+
+type EtapaTag = Hierarquia | "init" | "fallback" | "final";
+
+type Emit = (
+  level: ProgressLevel,
+  etapa: EtapaTag,
+  message: string,
+  data?: unknown,
+) => void;
+
 
 function getFirecrawl() {
   const key = process.env.FIRECRAWL_API_KEY;
@@ -29,25 +52,58 @@ function getProvider() {
   return createLovableAiGatewayProvider(key);
 }
 
+function shortHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 async function searchFirstUrl(
   fc: Firecrawl,
   query: string,
   prefer: (url: string) => boolean,
+  emit: Emit,
+  etapa: Hierarquia,
 ): Promise<string | null> {
+  emit("info", etapa, `Pesquisando no Google via Firecrawl: "${query}"`);
   try {
     const res = await fc.search(query, { limit: 6 });
-    // SDK v2 returns results under `web`
-    const web = (res as { web?: Array<{ url: string }> }).web ?? [];
-    if (web.length === 0) return null;
+    const web = (res as { web?: Array<{ url: string; title?: string }> }).web ?? [];
+    emit("info", etapa, `Recebi ${web.length} resultado(s) do buscador`, {
+      candidatos: web.map((r) => r.url),
+    });
+    if (web.length === 0) {
+      emit("warn", etapa, "Nenhum resultado retornado pelo buscador");
+      return null;
+    }
     const preferred = web.find((r) => prefer(r.url));
-    return (preferred ?? web[0]).url ?? null;
+    const chosen = (preferred ?? web[0]).url ?? null;
+    if (chosen) {
+      emit(
+        "success",
+        etapa,
+        preferred
+          ? `Escolhi um site .gov.br: ${shortHost(chosen)}`
+          : `Sem .gov.br preferencial, vou tentar: ${shortHost(chosen)}`,
+        { url: chosen },
+      );
+    }
+    return chosen;
   } catch (e) {
-    console.error("firecrawl search error", e);
+    emit("error", etapa, "Erro na busca do Firecrawl", String(e));
     return null;
   }
 }
 
-async function scrapeMarkdown(fc: Firecrawl, url: string): Promise<string | null> {
+async function scrapeMarkdown(
+  fc: Firecrawl,
+  url: string,
+  emit: Emit,
+  etapa: Hierarquia,
+): Promise<string | null> {
+  emit("info", etapa, `Lendo a página ${shortHost(url)} (scrape)...`);
   try {
     const res = await fc.scrape(url, {
       formats: ["markdown"],
@@ -57,9 +113,14 @@ async function scrapeMarkdown(fc: Firecrawl, url: string): Promise<string | null
       (res as { markdown?: string }).markdown ??
       (res as { data?: { markdown?: string } }).data?.markdown ??
       null;
-    return md && md.length > 50 ? md.slice(0, 18000) : md;
+    if (!md || md.length < 50) {
+      emit("warn", etapa, "Página vazia ou muito curta", { length: md?.length ?? 0 });
+      return md && md.length > 50 ? md : null;
+    }
+    emit("success", etapa, `Página lida (${md.length.toLocaleString("pt-BR")} caracteres)`);
+    return md.slice(0, 18000);
   } catch (e) {
-    console.error("firecrawl scrape error", e);
+    emit("error", etapa, "Erro no scrape do Firecrawl", String(e));
     return null;
   }
 }
@@ -67,41 +128,64 @@ async function scrapeMarkdown(fc: Firecrawl, url: string): Promise<string | null
 async function extractWithAI(
   markdown: string,
   url: string,
-  etapa: "educacao" | "geral" | "gabinete",
+  etapa: Hierarquia,
   municipio: string,
   uf: string,
+  emit: Emit,
 ): Promise<Extracted | null> {
   const provider = getProvider();
-  const focoMap = {
-    educacao: "Secretário(a) Municipal de Educação (e a Secretaria de Educação)",
-    geral: "Secretaria Geral / Administração / contato institucional da prefeitura",
-    gabinete: "Gabinete do Prefeito (chefe de gabinete, prefeito, contato direto)",
-  };
-  const prompt = `Você está extraindo contatos institucionais a partir do conteúdo de uma página web da prefeitura de ${municipio}/${uf}.
 
-URL: ${url}
-Foco da extração: ${focoMap[etapa]}.
+  const focoEtapa =
+    etapa === "educacao"
+      ? "Secretaria Municipal de Educação — nome do(a) Secretário(a) de Educação e e-mails/telefones DELA ou DA secretaria."
+      : etapa === "geral"
+        ? "Contato institucional GERAL da prefeitura (ouvidoria, fale-conosco, secretaria geral, telefone/e-mail principal)."
+        : "Contato do Gabinete do Prefeito ou do próprio Prefeito (último recurso).";
 
-Regras:
-- Extraia APENAS dados explicitamente presentes no texto.
-- E-mails e telefones devem aparecer literalmente no conteúdo.
-- Se não houver dados confiáveis sobre o foco, deixe os campos vazios e marque confianca = "baixa".
-- "secretario" só deve ser preenchido com o nome de uma pessoa real mencionada como responsável.
-- Telefones em formato brasileiro (com DDD se houver).
+  const prompt = `Você é um analista que extrai contatos institucionais de páginas oficiais da prefeitura de ${municipio}/${uf}.
 
-Conteúdo:
+ALVO PRINCIPAL DO PROJETO:
+  Secretaria Municipal de Educação de ${municipio}/${uf}.
+  O que mais queremos: NOME do(a) Secretário(a) de Educação + E-MAILS e TELEFONES dela ou da Secretaria de Educação.
+
+ORDEM DE FALLBACK (use só se o alvo principal não estiver na página):
+  1. Educação (alvo principal).
+  2. Contato GERAL da prefeitura (ouvidoria, fale-conosco, secretaria geral, e-mail/telefone institucional).
+  3. Gabinete do prefeito ou contato direto do prefeito.
+
+FOCO DESTA EXTRAÇÃO (etapa = "${etapa}"):
+  ${focoEtapa}
+
+REGRAS RÍGIDAS:
+- NUNCA invente. Só extraia o que aparece LITERALMENTE no texto fornecido.
+- "secretario" só com o nome de uma pessoa real, citada como responsável pela Educação.
+- E-mails e telefones precisam aparecer literalmente. Telefones em formato brasileiro (com DDD se houver).
+- "confianca" = "alta" só se o alvo desta etapa estiver claramente identificado nesta página.
+- Se a página claramente não traz nada útil para esta etapa, devolva arrays vazios e confianca = "baixa".
+
+URL analisada: ${url}
+
+Conteúdo (markdown):
 """
 ${markdown}
 """`;
+  emit("info", etapa, "Pedindo para a IA extrair os contatos desta página...");
   try {
     const { experimental_output } = await generateText({
       model: provider("google/gemini-3-flash-preview"),
       experimental_output: Output.object({ schema: ExtractSchema }),
       prompt,
     });
-    return experimental_output as Extracted;
+    const out = experimental_output as Extracted;
+    emit(
+      out.confianca === "baixa" ? "warn" : "success",
+      etapa,
+      `IA respondeu — secretário: ${out.secretario ?? "—"} · ${out.emails.length} e-mail(s) · ${out.telefones.length} tel · confiança ${out.confianca}`,
+      out,
+    );
+    return out;
   } catch (e) {
-    console.error("ai extract error", e);
+    emit("error", etapa, "Erro na chamada da IA", String(e));
     return null;
   }
 }
@@ -115,8 +199,8 @@ function fonteLabel(etapa: Hierarquia) {
   return etapa === "educacao"
     ? "Secretaria de Educação"
     : etapa === "geral"
-      ? "Secretaria Geral / Multifuncional"
-      : "Gabinete do Prefeito";
+      ? "Contato geral da prefeitura"
+      : "Gabinete do Prefeito (último recurso)";
 }
 
 async function runEtapa(
@@ -126,12 +210,13 @@ async function runEtapa(
   etapa: Hierarquia,
   municipio: string,
   uf: string,
+  emit: Emit,
 ): Promise<{ extracted: Extracted; url: string } | null> {
-  const url = await searchFirstUrl(fc, query, prefer);
+  const url = await searchFirstUrl(fc, query, prefer, emit, etapa);
   if (!url) return null;
-  const md = await scrapeMarkdown(fc, url);
+  const md = await scrapeMarkdown(fc, url, emit, etapa);
   if (!md) return null;
-  const extracted = await extractWithAI(md, url, etapa, municipio, uf);
+  const extracted = await extractWithAI(md, url, etapa, municipio, uf, emit);
   if (!extracted) return null;
   return { extracted, url };
 }
@@ -139,10 +224,30 @@ async function runEtapa(
 export async function prospectar(
   municipio: string,
   uf: string,
+  onEvent?: (evt: ProgressEvent) => void,
 ): Promise<ProspectResult> {
+  const emit: Emit = (level, etapa, message, data) => {
+    onEvent?.({
+      kind: "progress",
+      level,
+      etapa,
+      message,
+      data,
+      ts: Date.now(),
+    });
+  };
+
+  emit("info", "init", `Iniciando prospecção de ${municipio}/${uf}`);
+  emit(
+    "info",
+    "init",
+    "Alvo: Secretaria de Educação (nome + contatos). Fallback: contato geral da prefeitura → gabinete do prefeito.",
+  );
+
   const fc = getFirecrawl();
 
-  // Etapa 1: Secretaria de Educação
+  // Etapa 1: Educação
+  emit("info", "educacao", "Etapa 1 de 3 — procurando a Secretaria de Educação");
   const e1 = await runEtapa(
     fc,
     `prefeitura municipal ${municipio} ${uf} secretaria de educação contato secretário`,
@@ -150,9 +255,11 @@ export async function prospectar(
     "educacao",
     municipio,
     uf,
+    emit,
   );
   if (e1 && hasUsefulContact(e1.extracted)) {
-    return {
+    emit("success", "educacao", "Contato direto da Educação encontrado — parando aqui");
+    const result: ProspectResult = {
       status: "found",
       hierarquia: "educacao",
       secretario: e1.extracted.secretario,
@@ -163,19 +270,29 @@ export async function prospectar(
       fonteUrl: e1.url,
       contexto: e1.extracted.contexto,
     };
+    onEvent?.({ kind: "final", result, ts: Date.now() });
+    return result;
   }
+  emit(
+    "warn",
+    "fallback",
+    "Não consegui contato útil da Educação — caindo para o fallback (contato geral da prefeitura)",
+  );
 
-  // Etapa 2: Secretaria Geral
+  // Etapa 2: Geral
+  emit("info", "geral", "Etapa 2 de 3 — procurando um contato geral da prefeitura");
   const e2 = await runEtapa(
     fc,
-    `secretaria geral prefeitura ${municipio} ${uf} contato e-mail telefone`,
+    `secretaria geral prefeitura ${municipio} ${uf} contato e-mail telefone ouvidoria`,
     (u) => /\.gov\.br/i.test(u),
     "geral",
     municipio,
     uf,
+    emit,
   );
   if (e2 && hasUsefulContact(e2.extracted)) {
-    return {
+    emit("success", "geral", "Achei um contato geral utilizável");
+    const result: ProspectResult = {
       status: "partial",
       hierarquia: "geral",
       secretario: e2.extracted.secretario,
@@ -184,12 +301,15 @@ export async function prospectar(
       telefones: e2.extracted.telefones,
       fonte: fonteLabel("geral"),
       fonteUrl: e2.url,
-      contexto:
-        e2.extracted.contexto ?? "Secretaria geral — atende múltiplas pastas",
+      contexto: e2.extracted.contexto ?? "Contato geral da prefeitura (sem dados da Educação)",
     };
+    onEvent?.({ kind: "final", result, ts: Date.now() });
+    return result;
   }
+  emit("warn", "fallback", "Sem contato geral utilizável — última tentativa: gabinete do prefeito");
 
   // Etapa 3: Gabinete
+  emit("info", "gabinete", "Etapa 3 de 3 — procurando o gabinete do prefeito");
   const e3 = await runEtapa(
     fc,
     `gabinete do prefeito ${municipio} ${uf} contato e-mail telefone`,
@@ -197,9 +317,11 @@ export async function prospectar(
     "gabinete",
     municipio,
     uf,
+    emit,
   );
   if (e3 && hasUsefulContact(e3.extracted)) {
-    return {
+    emit("success", "gabinete", "Achei contato no gabinete do prefeito");
+    const result: ProspectResult = {
       status: "partial",
       hierarquia: "gabinete",
       secretario: e3.extracted.secretario,
@@ -208,16 +330,20 @@ export async function prospectar(
       telefones: e3.extracted.telefones,
       fonte: fonteLabel("gabinete"),
       fonteUrl: e3.url,
-      contexto:
-        e3.extracted.contexto ?? "Contato direto com o gabinete do prefeito",
+      contexto: e3.extracted.contexto ?? "Contato do gabinete do prefeito",
     };
+    onEvent?.({ kind: "final", result, ts: Date.now() });
+    return result;
   }
 
-  // Fallback: retorne o melhor parcial que tivermos
-  const best = [e1, e2, e3].find((x) => x && (x.extracted.emails.length || x.extracted.telefones.length));
+  // Fallback: melhor parcial
+  const best = [e1, e2, e3].find(
+    (x) => x && (x.extracted.emails.length || x.extracted.telefones.length),
+  );
   if (best) {
     const h: Hierarquia = best === e1 ? "educacao" : best === e2 ? "geral" : "gabinete";
-    return {
+    emit("warn", "fallback", `Devolvendo o melhor parcial encontrado (${fonteLabel(h)})`);
+    const result: ProspectResult = {
       status: "partial",
       hierarquia: h,
       secretario: best.extracted.secretario,
@@ -228,9 +354,12 @@ export async function prospectar(
       fonteUrl: best.url,
       contexto: best.extracted.contexto,
     };
+    onEvent?.({ kind: "final", result, ts: Date.now() });
+    return result;
   }
 
-  return {
+  emit("error", "final", "Não encontrei nada utilizável em nenhuma das três etapas");
+  const result: ProspectResult = {
     status: "not_found",
     hierarquia: null,
     secretario: null,
@@ -241,4 +370,6 @@ export async function prospectar(
     fonteUrl: null,
     contexto: "Nenhum contato encontrado nas etapas Educação, Geral e Gabinete.",
   };
+  onEvent?.({ kind: "final", result, ts: Date.now() });
+  return result;
 }
