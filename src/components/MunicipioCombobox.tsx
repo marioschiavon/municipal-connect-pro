@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadMunicipios, normalize, type Municipio } from "@/lib/ibge";
+import { logDebug } from "@/lib/debug-log";
 import { Input } from "@/components/ui/input";
 import { Loader2 } from "lucide-react";
 
@@ -18,9 +19,16 @@ export function MunicipioCombobox({ onSelect, disabled, selectedIds }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    logDebug("info", "combobox", "Montado — solicitando lista de municípios");
     loadMunicipios()
-      .then((data) => setAll(data))
-      .catch((e) => console.error(e))
+      .then((data) => {
+        setAll(data);
+        logDebug("success", "combobox", `Lista carregada: ${data.length} municípios disponíveis`);
+      })
+      .catch((e) => {
+        console.error(e);
+        logDebug("error", "combobox", "Erro ao carregar municípios", String(e));
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -44,6 +52,12 @@ export function MunicipioCombobox({ onSelect, disabled, selectedIds }: Props) {
         if (out.length >= 12) break;
       }
     }
+    logDebug(
+      out.length === 0 ? "warn" : "info",
+      "combobox",
+      `Busca "${query}" → ${out.length} sugestões`,
+      { query: q, primeiras: out.slice(0, 3).map((m) => `${m.nome}/${m.uf}`) },
+    );
     return out;
   }, [all, query, selectedIds]);
 
