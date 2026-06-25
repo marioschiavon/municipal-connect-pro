@@ -105,27 +105,37 @@ function eventIcon(evt: Extract<ProgressEvent, { kind: "progress" }>) {
 function Timeline({ events, live }: { events: ProgressEvent[]; live: boolean }) {
   const progress = events.filter((e): e is Extract<ProgressEvent, { kind: "progress" }> => e.kind === "progress");
   if (progress.length === 0) return null;
-  const list = live ? progress.slice(-8) : progress;
-  const body = (
-    <ol className="mt-3 space-y-1.5 border-l-2 border-slate-100 pl-3">
-      {list.map((e, i) => (
-        <li key={i} className="flex items-start gap-2 text-xs leading-snug text-slate-700">
-          <span className="mt-0.5">{eventIcon(e)}</span>
-          <span className="flex-1">{e.message}</span>
-        </li>
-      ))}
-    </ol>
-  );
-  if (live) return body;
+
+  if (live) {
+    const last = progress[progress.length - 1];
+    return (
+      <div className="mt-3 flex items-center gap-2 text-xs leading-snug text-slate-700 transition-all">
+        <span>{eventIcon(last)}</span>
+        <span className="flex-1 truncate" title={last.message}>{last.message}</span>
+        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+          {progress.length} {progress.length === 1 ? "passo" : "passos"}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <details className="mt-3 text-xs">
       <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
         Ver os {progress.length} passos da busca
       </summary>
-      {body}
+      <ol className="mt-2 space-y-1.5 border-l-2 border-slate-100 pl-3">
+        {progress.map((e, i) => (
+          <li key={i} className="flex items-start gap-2 text-xs leading-snug text-slate-700">
+            <span className="mt-0.5">{eventIcon(e)}</span>
+            <span className="flex-1">{e.message}</span>
+          </li>
+        ))}
+      </ol>
     </details>
   );
 }
+
 
 export function ResultCard({ municipio, uf, state, slow }: Props) {
   const result = state.phase === "done" ? state.result : null;
