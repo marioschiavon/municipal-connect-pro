@@ -412,7 +412,7 @@ export async function prospectar(
 
   // ===== ESTÁGIO A: descobrir o NOME =====
   let nomeSecretario: string | null = null;
-  let nomeFonte: "diario" | "site" | "busca-nome" | null = null;
+  let nomeFonte: "diario" | "site" | "busca-nome" | "snippet" | null = null;
   let urlSiteEducacao: string | null = null;
   let mdSiteEducacao: string | null = null;
   let extraConfirmado: Extracted | null = null; // se já veio contato no site institucional
