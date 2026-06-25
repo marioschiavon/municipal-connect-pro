@@ -819,6 +819,7 @@ export async function prospectar(
       fonteUrl: r2.url,
       contexto: r2.ext.contexto ?? "Contato geral da prefeitura (sem dados da Educação)",
       nomeFonte: nomeSecretario ? nomeFonte : null,
+      dataReferencia: r2.ext.dataReferencia ?? dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
