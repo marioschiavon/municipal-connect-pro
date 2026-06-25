@@ -43,13 +43,14 @@ type RunningCard = {
 async function streamProspect(
   municipio: string,
   uf: string,
+  ibgeId: number,
   signal: AbortSignal,
   onEvent: (evt: ProgressEvent) => void,
 ): Promise<ProspectResult | null> {
   const res = await fetch("/api/prospect", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ municipio, uf }),
+    body: JSON.stringify({ municipio, uf, ibgeId }),
     signal,
   });
   if (!res.ok || !res.body) {
@@ -154,7 +155,7 @@ function Index() {
       }, 45000);
 
       try {
-        const result = await streamProspect(m.nome, m.uf, controller.signal, (evt) => {
+        const result = await streamProspect(m.nome, m.uf, m.id, controller.signal, (evt) => {
           if (evt.kind === "progress") {
             logDebug(evt.level, scope, evt.message, evt.data);
             patchCard(key, (c) => {
@@ -344,8 +345,9 @@ function Index() {
           <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs leading-relaxed text-slate-600">
             <p className="font-semibold text-slate-700">Como o robô procura</p>
             <ol className="mt-1.5 list-decimal space-y-0.5 pl-4">
-              <li>Secretaria de Educação — nome e contatos</li>
-              <li>Fallback: contato geral da prefeitura</li>
+              <li>Site oficial da prefeitura — nome e contatos da Secretaria de Educação</li>
+              <li>Querido Diário (em paralelo) — pistas do nome do secretário em portarias e decretos</li>
+              <li>Fallback: contato geral da prefeitura (ouvidoria, fale-conosco)</li>
               <li>Último recurso: gabinete do prefeito</li>
             </ol>
           </div>

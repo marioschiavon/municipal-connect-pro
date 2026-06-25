@@ -1,74 +1,61 @@
-## O que aconteceu
+## Resposta rápida sobre as duas fontes
 
-Nos logs do console aparece, nas 3 etapas (Educação, Geral, Gabinete) de Umuarama/PR:
+**Querido Diário (Open Knowledge Brasil)** — Sim, vale muito a pena. É uma API pública e gratuita (`queridodiario.ok.org.br/api`) que indexa diários oficiais municipais já com OCR e busca por texto. Cobertura ~1.800 municípios. Ideal para descobrir **nome do(a) Secretário(a) de Educação** via portarias e decretos de nomeação/exoneração — exatamente o tipo de pista que o site da prefeitura raramente expõe.
 
+**Portal da Transparência (federal, portaltransparencia.gov.br)** — Pouco útil para o nosso caso. Ele é focado em recursos federais (servidores da União, convênios, despesas federais). Não lista secretários municipais nem traz contatos institucionais. Daria no máximo CNPJ da prefeitura e convênios do FNDE, que não ajudam na prospecção comercial.
+
+**Portais municipais de transparência** (cada prefeitura tem o seu) — Aí sim costuma ter "estrutura administrativa" com nome do secretário e às vezes e-mail/telefone. Mas como cada município tem layout próprio, isso já é coberto pelo nosso scraper genérico atual.
+
+**Recomendação**: integrar Querido Diário agora; pular Transparência federal; deixar portais municipais de transparência como uma query adicional no Firecrawl.
+
+## Plano de implementação
+
+### 1. Nova etapa "diário oficial" antes da extração final
+
+Adicionar uma quarta fonte que roda **em paralelo à etapa 1 (Educação)**, não como fallback. O objetivo é enriquecer o nome do secretário mesmo quando o site da prefeitura achou só o e-mail genérico.
+
+```text
+[Busca site prefeitura] ──┐
+                          ├──► [IA consolida] ──► resultado
+[Busca Querido Diário] ───┘
 ```
-AI_NoObjectGeneratedError: No object generated: response did not match schema.
-```
 
-Conferi os logs do AI Gateway dos mesmos horários (22:32:55, 22:33:00, 22:33:04). **Os 3 retornaram HTTP 200** — ou seja, o gateway e o Gemini 3 Flash responderam normalmente (1126, 188 e 120 tokens de saída). O erro **não é** rate limit, créditos, chave inválida ou timeout.
+### 2. Cliente Querido Diário (`src/lib/querido-diario.server.ts`)
 
-O erro acontece **do lado do AI SDK**, depois da resposta chegar: o texto que o Gemini devolveu não passou na validação do schema Zod que pedimos via `experimental_output: Output.object({ schema: ExtractSchema })` em `src/lib/prospect.server.ts:214-218`.
+- Endpoint: `GET https://queridodiario.ok.org.br/api/gazettes`
+- Parâmetros: `territory_ids` (código IBGE de 7 dígitos), `querystring` (ex.: `"secretário de educação" OR "secretária de educação"`), `sort_by=relevance`, `size=5`, `published_since` (últimos 24 meses).
+- Resposta traz `excerpts` com o trecho do diário onde o termo apareceu — perfeito para a IA extrair o nome.
+- Sem chave de API, sem custo.
 
-## Por que está falhando
+### 3. Mudanças em `src/lib/prospect.server.ts`
 
-`generateText` + `experimental_output` é uma rota experimental do AI SDK: ela injeta instruções de JSON no prompt e tenta fazer `JSON.parse` + Zod no texto bruto. Com Gemini 3 Flash isso quebra em três cenários comuns, e os 3 estão batendo no nosso caso:
+- Receber o **código IBGE** do município (já disponível em `src/lib/ibge.ts`) — vou passar pelo endpoint `/api/prospect`.
+- Em `runEtapa("educacao", ...)`, antes de retornar, consultar o Querido Diário em paralelo. Se vier excerpts com nome plausível, juntar ao markdown enviado para a IA com uma seção `### Pistas do Diário Oficial`.
+- A IA passa a ter duas fontes de evidência: site oficial + diário. Isso aumenta muito a chance de capturar o nome do secretário, que é o campo mais frágil hoje.
+- Eventos de progresso novos: "Consultando diários oficiais de {município}…", "Encontrei N menções recentes a Secretário de Educação", "Sem diário indexado para esse município" (quando município não está coberto).
 
-1. **Resposta de 1126 tokens na 1ª chamada** (Educação, página de 25k chars com dezenas de e-mails de CMEIs) — o modelo provavelmente devolveu raciocínio + JSON, ou um array grande embrulhado em ```json ... ```, e o parser do `experimental_output` não tolera prefixo/sufixo.
-2. **Enum estrito** (`confianca: "alta" | "media" | "baixa"`) — Gemini às vezes devolve `"média"` (com acento) ou `"medium"`, e o Zod rejeita.
-3. **Campos `nullable`** — Gemini às vezes omite a chave em vez de mandar `null`, e o Zod rejeita.
+### 4. Mudanças no contrato `/api/prospect`
 
-Como `extractWithAI` retorna `null` quando isso acontece, `hasUsefulContact` vira `false` e cai pro próximo fallback — mesmo a página tendo `gabinete@umuarama.pr.gov.br` literal nas pistas regex. Foi isso que você viu: "Não encontrei nada utilizável em nenhuma das três etapas", mesmo com o regex já tendo achado os contatos.
+- Input passa a aceitar `ibgeId` (opcional, mas usado quando presente).
+- Frontend (`src/routes/index.tsx`) já tem o `Municipio.id` — só passar adiante.
 
-## Plano de correção (Alpha v0.2 → v0.3)
+### 5. UI
 
-### 1. Trocar `generateText + experimental_output` por `generateObject`
-Em `src/lib/prospect.server.ts`, função `extractWithAI`:
-- Importar `generateObject` de `"ai"`.
-- Substituir a chamada por:
-  ```ts
-  const { object } = await generateObject({
-    model: provider("google/gemini-3-flash-preview"),
-    schema: ExtractSchema,
-    prompt,
-  });
-  ```
-- `generateObject` usa o modo JSON nativo do provider (mais robusto que o `experimental_output`) e já trata o caso de texto wrapper em ```json.
+- Sem mudanças visuais grandes. A timeline ao vivo já mostra os eventos novos automaticamente.
+- No card final, quando o nome do secretário vier do diário, badge extra: "Nome confirmado via Diário Oficial".
+- Atualizar o box "Como o robô procura" na coluna lateral para listar Querido Diário como segunda fonte.
 
-### 2. Afrouxar o schema para reduzir rejeições falsas
-- `emails` e `telefones`: `.array(z.string()).default([])` para que a chave possa vir ausente.
-- `confianca`: aceitar variações comuns — `z.enum([...]).or(z.string().transform(s => normalizeConfianca(s)))` mapeando "média"/"medium"/"high" etc. para os 3 valores canônicos.
-- `secretario`, `cargo`, `contexto`: `.nullable().optional().default(null)`.
+### 6. Versão
 
-### 3. Fallback de emergência: usar as pistas regex
-Se mesmo com `generateObject` a chamada falhar (catch), em vez de devolver `null` direto, montar um `Extracted` mínimo a partir de `extractContactsRegex(markdown)` com `confianca: "baixa"` e `contexto: "IA falhou — contatos extraídos por regex da página"`. Isso evita perder dados quando o regex já tinha visto `gabinete@umuarama.pr.gov.br`.
+- Bump para **Alpha v0.4** (alteração funcional, regra Alpha mantida).
 
-### 4. Reforçar o prompt
-- Adicionar no final: `Responda APENAS com JSON válido, sem comentários, sem markdown, sem \`\`\`json.`
-- Reduzir o `markdown.slice(0, 18000)` para `slice(0, 12000)` na etapa Educação quando a página é gigante (caso Umuarama 25k chars), para diminuir alucinação/raciocínio extenso.
+## O que NÃO vou fazer agora
 
-### 5. Melhorar o log de erro no /debug
-Hoje o emit mostra só `String(e)`. Trocar por algo como:
-```ts
-emit("error", etapa, "Erro na IA: schema não bateu", {
-  message: e.message,
-  cause: e.cause?.message,
-  rawText: e.text?.slice(0, 500), // quando NoObjectGeneratedError, o SDK expõe .text
-});
-```
-Assim, no /debug você vê o JSON cru que o Gemini devolveu e a gente confirma o motivo real da rejeição.
+- Não integrar Portal da Transparência federal — baixo retorno para o caso de uso.
+- Não criar página dedicada de diários — o uso é só interno, como fonte de pistas.
+- Não persistir resultados de diário — busca on-demand a cada prospecção.
 
-### 6. Bump de versão
-`src/lib/version.ts`: `Alpha v0.2` → `Alpha v0.3`.
+## Arquivos previstos
 
-## O que NÃO vou mexer
-
-- Hierarquia de fallback (Educação → Geral → Gabinete) — está correta.
-- Scraper nativo + Firecrawl — funcionou, baixou as 3 páginas.
-- UI / streaming / cancelamento.
-
-## Resultado esperado
-
-Rodando Umuarama/PR de novo:
-- Etapa Educação: IA deve devolver `educacao@umuarama.pr.gov.br` + telefone (44) 2030-4050 com confiança alta → card finaliza no 1º passo, sem fallback.
-- Se mesmo assim a IA falhar pontualmente, o card cai pro fallback regex e mostra os e-mails que já estavam nas pistas, em vez de "not_found".
+- **Criar**: `src/lib/querido-diario.server.ts`
+- **Editar**: `src/lib/prospect.server.ts`, `src/lib/prospect.types.ts` (campos opcionais para origem do nome), `src/routes/api/prospect.ts` (aceitar `ibgeId`), `src/routes/index.tsx` (enviar `ibgeId` e atualizar texto do "Como o robô procura"), `src/components/ResultCard.tsx` (badge "via Diário Oficial"), `src/lib/version.ts` (Alpha v0.4).
