@@ -1,11 +1,26 @@
-import { Loader2, CheckCircle2, AlertTriangle, XCircle, ExternalLink, Mail, Phone, User, Briefcase, Clock } from "lucide-react";
-import type { ProspectResult, Hierarquia } from "@/lib/prospect.types";
+import {
+  Loader2,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  ExternalLink,
+  Mail,
+  Phone,
+  User,
+  Briefcase,
+  Clock,
+  Search,
+  Globe,
+  Brain,
+  ArrowRightCircle,
+} from "lucide-react";
+import type { ProspectResult, Hierarquia, ProgressEvent } from "@/lib/prospect.types";
 
 export type CardState =
-  | { phase: "searching" }
-  | { phase: "analyzing" }
-  | { phase: "done"; result: ProspectResult }
-  | { phase: "error"; error: string };
+  | { phase: "searching"; events: ProgressEvent[] }
+  | { phase: "analyzing"; events: ProgressEvent[] }
+  | { phase: "done"; result: ProspectResult; events: ProgressEvent[] }
+  | { phase: "error"; error: string; events: ProgressEvent[] };
 
 type Props = {
   municipio: string;
@@ -16,17 +31,17 @@ type Props = {
 
 const hierBadge: Record<Hierarquia, { label: string; cls: string; dot: string }> = {
   educacao: {
-    label: "Secretaria de Educação",
+    label: "Contato direto da Educação",
     cls: "bg-emerald-50 text-emerald-700 border-emerald-200",
     dot: "bg-emerald-500",
   },
   geral: {
-    label: "Secretaria Geral / Multifuncional",
+    label: "Contato geral da prefeitura (fallback)",
     cls: "bg-amber-50 text-amber-700 border-amber-200",
     dot: "bg-amber-500",
   },
   gabinete: {
-    label: "Gabinete do Prefeito",
+    label: "Gabinete do prefeito (último recurso)",
     cls: "bg-sky-50 text-sky-700 border-sky-200",
     dot: "bg-sky-500",
   },
@@ -71,9 +86,51 @@ function StatusPill({ state }: { state: CardState }) {
   );
 }
 
+function eventIcon(evt: Extract<ProgressEvent, { kind: "progress" }>) {
+  const cls = "h-3.5 w-3.5 shrink-0";
+  if (evt.level === "error") return <XCircle className={`${cls} text-red-600`} />;
+  if (evt.level === "warn") return <AlertTriangle className={`${cls} text-amber-600`} />;
+  if (evt.level === "success") return <CheckCircle2 className={`${cls} text-emerald-600`} />;
+  const m = evt.message.toLowerCase();
+  if (m.includes("pesquisando") || m.includes("buscador") || m.includes("resultado"))
+    return <Search className={`${cls} text-slate-500`} />;
+  if (m.includes("lendo") || m.includes("scrape") || m.includes("página"))
+    return <Globe className={`${cls} text-slate-500`} />;
+  if (m.includes("ia ") || m.includes("extrair") || m.includes("ia.")) return <Brain className={`${cls} text-slate-500`} />;
+  if (m.startsWith("etapa") || m.includes("fallback"))
+    return <ArrowRightCircle className={`${cls} text-slate-500`} />;
+  return <Loader2 className={`${cls} text-slate-400`} />;
+}
+
+function Timeline({ events, live }: { events: ProgressEvent[]; live: boolean }) {
+  const progress = events.filter((e): e is Extract<ProgressEvent, { kind: "progress" }> => e.kind === "progress");
+  if (progress.length === 0) return null;
+  const list = live ? progress.slice(-8) : progress;
+  const body = (
+    <ol className="mt-3 space-y-1.5 border-l-2 border-slate-100 pl-3">
+      {list.map((e, i) => (
+        <li key={i} className="flex items-start gap-2 text-xs leading-snug text-slate-700">
+          <span className="mt-0.5">{eventIcon(e)}</span>
+          <span className="flex-1">{e.message}</span>
+        </li>
+      ))}
+    </ol>
+  );
+  if (live) return body;
+  return (
+    <details className="mt-3 text-xs">
+      <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+        Ver os {progress.length} passos da busca
+      </summary>
+      {body}
+    </details>
+  );
+}
+
 export function ResultCard({ municipio, uf, state, slow }: Props) {
   const result = state.phase === "done" ? state.result : null;
   const hier = result?.hierarquia ? hierBadge[result.hierarquia] : null;
+  const live = state.phase === "searching" || state.phase === "analyzing";
 
   return (
     <div className="rounded-lg border border-border bg-white p-5">
@@ -94,7 +151,7 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
         <StatusPill state={state} />
       </div>
 
-      {slow && state.phase !== "done" && state.phase !== "error" && (
+      {slow && live && (
         <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-amber-700">
           <Clock className="h-3 w-3" /> Levando mais tempo que o esperado...
         </p>
@@ -103,6 +160,8 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
       {state.phase === "error" && (
         <p className="mt-3 text-sm text-red-700">{state.error}</p>
       )}
+
+      <Timeline events={state.events} live={live} />
 
       {result && (
         <div className="mt-4 space-y-2.5 text-sm">
