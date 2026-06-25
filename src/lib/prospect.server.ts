@@ -613,9 +613,26 @@ export async function prospectar(
       nomeSecretario,
       diarioBlock || undefined,
     );
-    if (full?.secretario && !nomeSecretario) {
+    // Detecta conflito de nome entre diário e snippet/site — prefere o "atual" (IA).
+    if (
+      full?.secretario &&
+      nomeSecretario &&
+      full.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()
+    ) {
+      emit(
+        "warn",
+        "nome",
+        `Conflito de nome: diário=${nomeSecretario} / IA(site+snippet)=${full.secretario} — adotando "${full.secretario}" por ser provavelmente o atual`,
+      );
       nomeSecretario = full.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
+    } else if (full?.secretario && !nomeSecretario) {
+      nomeSecretario = full.secretario;
+      nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
+    } else if (full?.dataReferencia && !dataReferenciaGlobal) {
+      dataReferenciaGlobal = full.dataReferencia;
     }
     if (full && hasUsefulContact(full) && full.secretario) {
       const viaSnippet = onlySnippets;
@@ -637,6 +654,7 @@ export async function prospectar(
         fonteUrl: urlSiteEducacao,
         contexto: full.contexto ?? (viaSnippet ? "Dados extraídos do resumo dos resultados do Google." : null),
         nomeFonte: viaSnippet ? "snippet" : nomeFonte,
+        dataReferencia: full.dataReferencia ?? dataReferenciaGlobal,
       };
       onEvent?.({ kind: "final", result, ts: Date.now() });
       return result;
@@ -662,6 +680,7 @@ export async function prospectar(
     if (n?.secretario) {
       nomeSecretario = n.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = n.dataReferencia ?? dataReferenciaGlobal;
     }
   }
 
