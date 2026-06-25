@@ -363,6 +363,7 @@ Responda APENAS com JSON válido seguindo o schema.`;
         telefones: hints.telefones.slice(0, 5),
         contexto: "IA falhou — contatos extraídos por regex da página",
         confianca: "baixa",
+        dataReferencia: null,
       };
       emit("warn", etapa, `Regex recuperou ${fallback.emails.length} e-mail(s) e ${fallback.telefones.length} tel`, fallback);
       return fallback;
