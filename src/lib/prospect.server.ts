@@ -84,41 +84,78 @@ function shortHost(url: string): string {
   }
 }
 
-async function searchFirstUrl(
+type SearchCandidate = {
+  url: string;
+  title: string;
+  description: string;
+  markdown: string | null;
+};
+
+function isBlockedHost(url: string): boolean {
+  return /(?:instagram\.com|facebook\.com|youtube\.com|tiktok\.com|twitter\.com|x\.com)/i.test(url);
+}
+
+async function searchCandidates(
   fc: Firecrawl,
   query: string,
-  prefer: (url: string) => boolean,
   emit: Emit,
   etapa: EtapaTag,
-): Promise<string | null> {
+  withScrape = true,
+): Promise<SearchCandidate[]> {
   emit("info", etapa, `Pesquisando no Google via Firecrawl: "${query}"`);
   try {
-    const res = await fc.search(query, { limit: 6 });
-    const web = (res as { web?: Array<{ url: string; title?: string }> }).web ?? [];
-    emit("info", etapa, `Recebi ${web.length} resultado(s) do buscador`, {
-      candidatos: web.map((r) => r.url),
+    const res = withScrape
+      ? await fc.search(query, {
+          limit: 5,
+          scrapeOptions: { formats: ["markdown"], onlyMainContent: true },
+        })
+      : await fc.search(query, { limit: 5 });
+    const web =
+      (res as { web?: Array<{ url: string; title?: string; description?: string; markdown?: string }> })
+        .web ?? [];
+    const cands: SearchCandidate[] = web
+      .filter((r) => r.url && !isBlockedHost(r.url))
+      .map((r) => ({
+        url: r.url,
+        title: r.title ?? "",
+        description: r.description ?? "",
+        markdown: r.markdown && r.markdown.length > 80 ? r.markdown.slice(0, 6000) : null,
+      }));
+    emit("info", etapa, `Recebi ${cands.length} candidato(s) úteis do buscador`, {
+      candidatos: cands.map((c) => ({
+        url: c.url,
+        snippet: `${c.title} — ${c.description}`.slice(0, 200),
+        temMarkdown: !!c.markdown,
+      })),
     });
-    if (web.length === 0) {
-      emit("warn", etapa, "Nenhum resultado retornado pelo buscador");
-      return null;
+    if (cands.length === 0) {
+      emit("warn", etapa, "Nenhum resultado utilizável retornado pelo buscador");
     }
-    const preferred = web.find((r) => prefer(r.url));
-    const chosen = (preferred ?? web[0]).url ?? null;
-    if (chosen) {
-      emit(
-        "success",
-        etapa,
-        preferred
-          ? `Escolhi um site .gov.br: ${shortHost(chosen)}`
-          : `Sem .gov.br preferencial, vou tentar: ${shortHost(chosen)}`,
-        { url: chosen },
-      );
-    }
-    return chosen;
+    return cands;
   } catch (e) {
     emit("error", etapa, "Erro na busca do Firecrawl", String(e));
-    return null;
+    return [];
   }
+}
+
+function snippetsBlock(cands: SearchCandidate[]): string {
+  if (cands.length === 0) return "";
+  const lines = cands.map(
+    (c, i) =>
+      `[${i + 1}] ${c.title}\n    URL: ${c.url}\n    Resumo: ${c.description || "(sem resumo)"}`,
+  );
+  return `### Resultados do Google (snippets — frequentemente já trazem nome/contato)\n${lines.join("\n")}\n`;
+}
+
+function preferGov(cands: SearchCandidate[], extra?: (u: string) => boolean): SearchCandidate[] {
+  const score = (c: SearchCandidate) => {
+    let s = 0;
+    if (/\.gov\.br/i.test(c.url)) s += 10;
+    if (extra && extra(c.url)) s += 5;
+    if (c.markdown) s += 2;
+    return -s; // sort ascending = best first when negated
+  };
+  return [...cands].sort((a, b) => score(a) - score(b));
 }
 
 async function scrapeMarkdown(
@@ -375,7 +412,7 @@ export async function prospectar(
 
   // ===== ESTÁGIO A: descobrir o NOME =====
   let nomeSecretario: string | null = null;
-  let nomeFonte: "diario" | "site" | "busca-nome" | null = null;
+  let nomeFonte: "diario" | "site" | "busca-nome" | "snippet" | null = null;
   let urlSiteEducacao: string | null = null;
   let mdSiteEducacao: string | null = null;
   let extraConfirmado: Extracted | null = null; // se já veio contato no site institucional
@@ -417,28 +454,48 @@ export async function prospectar(
     emit("info", "diario", "Sem código IBGE — pulando consulta ao Querido Diário");
   }
 
-  // A2: busca + scrape do site oficial da Educação (em paralelo lógico ao diário)
+  // A2: busca + scrape (em batch) do site oficial da Educação
   emit("info", "nome", "Estágio A — descobrindo o nome do(a) Secretário(a) de Educação");
-  const urlSite = await searchFirstUrl(
+  const candsA = await searchCandidates(
     fc,
-    `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário`,
-    (u) => /\.gov\.br/i.test(u) && /(educa|secretari)/i.test(u),
+    `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário nome contato`,
     emit,
     "nome",
   );
-  if (urlSite) {
-    urlSiteEducacao = urlSite;
-    mdSiteEducacao = await scrapeMarkdown(fc, urlSite, emit, "nome");
+  const rankedA = preferGov(candsA, (u) => /(educa|secretari)/i.test(u));
+  const topA = rankedA[0] ?? null;
+  urlSiteEducacao = topA?.url ?? null;
+
+  // Markdown agregado: usa o que o Firecrawl já trouxe via scrapeOptions.
+  const inlineMdA = rankedA
+    .filter((c) => c.markdown)
+    .map((c) => `--- ${shortHost(c.url)} (${c.url}) ---\n${c.markdown}`)
+    .join("\n\n");
+  if (inlineMdA) {
+    const kb = (inlineMdA.length / 1024).toFixed(1);
+    emit(
+      "success",
+      "nome",
+      `Firecrawl trouxe markdown de ${rankedA.filter((c) => c.markdown).length} página(s) já no search (~${kb} KB)`,
+    );
+  } else if (topA) {
+    // Fallback: tenta scrapear top candidato sob demanda.
+    mdSiteEducacao = await scrapeMarkdown(fc, topA.url, emit, "nome");
   }
+  const snippetsA = snippetsBlock(rankedA);
+  // Conteúdo "para a IA" = snippets do Google + markdown agregado (ou scrape sob demanda).
+  const contentA = inlineMdA || mdSiteEducacao || "";
+  const combinedA = [snippetsA, contentA].filter(Boolean).join("\n\n");
+  if (contentA) mdSiteEducacao = contentA;
 
   // Espera o diário terminar antes de montar prompt
   await diarioPromise;
   const diarioBlock = formatExcerptsForPrompt(diarioExcerpts);
 
-  // A3: tenta extração COMPLETA do site (atalho feliz: já vem nome + contato)
-  if (mdSiteEducacao && urlSiteEducacao) {
+  // A3: tenta extração COMPLETA (snippets + markdown) — atalho feliz
+  if (combinedA && urlSiteEducacao) {
     const full = await extractWithAI(
-      mdSiteEducacao,
+      combinedA,
       urlSiteEducacao,
       "educacao",
       municipio,
@@ -449,10 +506,10 @@ export async function prospectar(
     );
     if (full?.secretario && !nomeSecretario) {
       nomeSecretario = full.secretario;
-      nomeFonte = "site";
+      nomeFonte = inlineMdA ? "site" : contentA === inlineMdA ? "site" : "site";
     }
     if (full && hasUsefulContact(full) && full.secretario) {
-      emit("success", "educacao", "Atalho feliz: nome + contato direto da Educação no site oficial");
+      emit("success", "educacao", "Atalho feliz: nome + contato direto (snippets + site oficial)");
       const result: ProspectResult = {
         status: "found",
         hierarquia: "educacao",
@@ -469,17 +526,16 @@ export async function prospectar(
       return result;
     }
     if (full && hasUsefulContact(full)) {
-      extraConfirmado = full; // contato sem nome — guarda como parcial
+      extraConfirmado = full;
     }
   } else if (!nomeSecretario) {
-    // A.alt: extrai só o nome do site se houve scrape mas sem contato útil ainda
-    emit("info", "nome", "Vou tentar identificar pelo menos o nome no site da Secretaria");
+    emit("warn", "nome", "Sem snippets nem markdown utilizáveis nesta busca");
   }
 
-  // Se ainda não temos nome E temos markdown, faz extração focada em nome
-  if (!nomeSecretario && mdSiteEducacao && urlSiteEducacao) {
+  // Se ainda não temos nome E temos conteúdo, faz extração focada em nome
+  if (!nomeSecretario && combinedA && urlSiteEducacao) {
     const n = await extractNomeWithAI(
-      mdSiteEducacao,
+      combinedA,
       urlSiteEducacao,
       municipio,
       uf,
@@ -488,7 +544,7 @@ export async function prospectar(
     );
     if (n?.secretario) {
       nomeSecretario = n.secretario;
-      nomeFonte = "site";
+      nomeFonte = inlineMdA && !mdSiteEducacao ? "snippet" : "site";
     }
   }
 
@@ -497,25 +553,26 @@ export async function prospectar(
     emit(
       "info",
       "contato-secretario",
-      `Estágio B — buscando contatos de "${nomeSecretario}" (${(nomeFonte as string | null) === "diario" ? "via Diário Oficial" : "via site oficial"})`,
+      `Estágio B — buscando contatos de "${nomeSecretario}" (${(nomeFonte as string | null) === "diario" ? "via Diário Oficial" : (nomeFonte as string | null) === "snippet" ? "via snippet do Google" : "via site oficial"})`,
     );
     const queries = [
       `"${nomeSecretario}" secretário educação ${municipio} ${uf} e-mail telefone`,
       `"${nomeSecretario}" secretaria municipal educação ${municipio} contato`,
     ];
     for (const q of queries) {
-      const u = await searchFirstUrl(
-        fc,
-        q,
-        (url) => /\.gov\.br/i.test(url),
-        emit,
-        "contato-secretario",
-      );
-      if (!u) continue;
-      const md = await scrapeMarkdown(fc, u, emit, "contato-secretario");
-      if (!md) continue;
+      const cands = await searchCandidates(fc, q, emit, "contato-secretario");
+      const ranked = preferGov(cands);
+      if (ranked.length === 0) continue;
+      const inlineMd = ranked
+        .filter((c) => c.markdown)
+        .map((c) => `--- ${shortHost(c.url)} ---\n${c.markdown}`)
+        .join("\n\n");
+      const snippets = snippetsBlock(ranked);
+      const combined = [snippets, inlineMd].filter(Boolean).join("\n\n");
+      if (!combined) continue;
+      const u = ranked[0].url;
       const ext = await extractWithAI(
-        md,
+        combined,
         u,
         "educacao",
         municipio,
@@ -547,7 +604,6 @@ export async function prospectar(
   }
 
   // ===== ESTÁGIO C/D: fallback institucional =====
-  // Se já temos um contato institucional (sem nome) do site da Educação, registra como parcial.
   if (extraConfirmado) {
     emit(
       "success",
@@ -570,32 +626,48 @@ export async function prospectar(
     return result;
   }
 
+  // Helper local: roda um estágio de fallback (geral/gabinete) com batch search.
+  async function runFallback(
+    etapa: Hierarquia,
+    query: string,
+  ): Promise<{ ext: Extracted; url: string } | null> {
+    const cands = await searchCandidates(fc, query, emit, etapa);
+    const ranked = preferGov(cands);
+    if (ranked.length === 0) return null;
+    const inlineMd = ranked
+      .filter((c) => c.markdown)
+      .map((c) => `--- ${shortHost(c.url)} ---\n${c.markdown}`)
+      .join("\n\n");
+    const snippets = snippetsBlock(ranked);
+    let combined = [snippets, inlineMd].filter(Boolean).join("\n\n");
+    if (!inlineMd) {
+      const md = await scrapeMarkdown(fc, ranked[0].url, emit, etapa);
+      if (md) combined = [snippets, md].filter(Boolean).join("\n\n");
+    }
+    if (!combined) return null;
+    const ext = await extractWithAI(combined, ranked[0].url, etapa, municipio, uf, emit);
+    if (ext && hasUsefulContact(ext)) return { ext, url: ranked[0].url };
+    return null;
+  }
+
   emit("warn", "fallback", "Caindo para contato geral da prefeitura");
   emit("info", "geral", "Estágio D1 — procurando um contato geral da prefeitura");
-  const urlGeral = await searchFirstUrl(
-    fc,
-    `secretaria geral prefeitura ${municipio} ${uf} contato e-mail telefone ouvidoria`,
-    (u) => /\.gov\.br/i.test(u),
-    emit,
+  const r2 = await runFallback(
     "geral",
+    `secretaria geral prefeitura ${municipio} ${uf} contato e-mail telefone ouvidoria`,
   );
-  let e2: Extracted | null = null;
-  if (urlGeral) {
-    const md = await scrapeMarkdown(fc, urlGeral, emit, "geral");
-    if (md) e2 = await extractWithAI(md, urlGeral, "geral", municipio, uf, emit);
-  }
-  if (e2 && hasUsefulContact(e2)) {
+  if (r2) {
     emit("success", "geral", "Achei um contato geral utilizável");
     const result: ProspectResult = {
       status: "partial",
       hierarquia: "geral",
-      secretario: nomeSecretario ?? e2.secretario,
-      cargo: e2.cargo,
-      emails: e2.emails,
-      telefones: e2.telefones,
+      secretario: nomeSecretario ?? r2.ext.secretario,
+      cargo: r2.ext.cargo,
+      emails: r2.ext.emails,
+      telefones: r2.ext.telefones,
       fonte: fonteLabel("geral"),
-      fonteUrl: urlGeral,
-      contexto: e2.contexto ?? "Contato geral da prefeitura (sem dados da Educação)",
+      fonteUrl: r2.url,
+      contexto: r2.ext.contexto ?? "Contato geral da prefeitura (sem dados da Educação)",
       nomeFonte: nomeSecretario ? nomeFonte : null,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
@@ -604,30 +676,22 @@ export async function prospectar(
 
   emit("warn", "fallback", "Sem contato geral utilizável — última tentativa: gabinete do prefeito");
   emit("info", "gabinete", "Estágio D2 — procurando o gabinete do prefeito");
-  const urlGab = await searchFirstUrl(
-    fc,
-    `gabinete do prefeito ${municipio} ${uf} contato e-mail telefone`,
-    (u) => /\.gov\.br/i.test(u),
-    emit,
+  const r3 = await runFallback(
     "gabinete",
+    `gabinete do prefeito ${municipio} ${uf} contato e-mail telefone`,
   );
-  let e3: Extracted | null = null;
-  if (urlGab) {
-    const md = await scrapeMarkdown(fc, urlGab, emit, "gabinete");
-    if (md) e3 = await extractWithAI(md, urlGab, "gabinete", municipio, uf, emit);
-  }
-  if (e3 && hasUsefulContact(e3)) {
+  if (r3) {
     emit("success", "gabinete", "Achei contato no gabinete do prefeito");
     const result: ProspectResult = {
       status: "partial",
       hierarquia: "gabinete",
-      secretario: nomeSecretario ?? e3.secretario,
-      cargo: e3.cargo,
-      emails: e3.emails,
-      telefones: e3.telefones,
+      secretario: nomeSecretario ?? r3.ext.secretario,
+      cargo: r3.ext.cargo,
+      emails: r3.ext.emails,
+      telefones: r3.ext.telefones,
       fonte: fonteLabel("gabinete"),
-      fonteUrl: urlGab,
-      contexto: e3.contexto ?? "Contato do gabinete do prefeito",
+      fonteUrl: r3.url,
+      contexto: r3.ext.contexto ?? "Contato do gabinete do prefeito",
       nomeFonte: nomeSecretario ? nomeFonte : null,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
