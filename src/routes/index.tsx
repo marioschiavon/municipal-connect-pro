@@ -42,12 +42,14 @@ type RunningCard = {
 async function streamProspect(
   municipio: string,
   uf: string,
+  signal: AbortSignal,
   onEvent: (evt: ProgressEvent) => void,
 ): Promise<ProspectResult | null> {
   const res = await fetch("/api/prospect", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ municipio, uf }),
+    signal,
   });
   if (!res.ok || !res.body) {
     throw new Error(`HTTP ${res.status}`);
