@@ -31,6 +31,7 @@ const ExtractSchema = z.object({
   telefones: z.array(z.string()).optional().default([]),
   contexto: z.string().nullable().optional().default(null),
   confianca: ConfiancaLoose.default("baixa"),
+  dataReferencia: z.string().nullable().optional().default(null),
 });
 
 const NomeSchema = z.object({
@@ -38,6 +39,7 @@ const NomeSchema = z.object({
   cargo: z.string().nullable().optional().default(null),
   contexto: z.string().nullable().optional().default(null),
   confianca: ConfiancaLoose.default("baixa"),
+  dataReferencia: z.string().nullable().optional().default(null),
 });
 
 type Extracted = {
@@ -47,6 +49,7 @@ type Extracted = {
   telefones: string[];
   contexto: string | null;
   confianca: "alta" | "media" | "baixa";
+  dataReferencia: string | null;
 };
 
 type NomeOnly = {
@@ -54,6 +57,7 @@ type NomeOnly = {
   cargo: string | null;
   contexto: string | null;
   confianca: "alta" | "media" | "baixa";
+  dataReferencia: string | null;
 };
 
 type Emit = (
