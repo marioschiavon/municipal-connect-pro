@@ -3,4 +3,4 @@
 // A cada turno com alteração funcional de código, incrementar o patch:
 //   Alpha v0.1 → Alpha v0.2 → ... → Alpha v0.9 → Alpha v0.10 → ...
 // Permanece "Alpha" indefinidamente até liberação manual.
-export const APP_VERSION = "Alpha v0.9";
+export const APP_VERSION = "Alpha v0.10";

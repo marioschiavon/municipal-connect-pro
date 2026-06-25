@@ -12,6 +12,8 @@ export type ProspectResult = {
   contexto: string | null;
   /** Origem do NOME do secretário, quando aplicável. */
   nomeFonte?: "site" | "diario" | "busca-nome" | "snippet" | null;
+  /** Data/período de referência da informação (ex.: "2025-11", "abril/2025"). */
+  dataReferencia?: string | null;
 };
 
 export type ProgressLevel = "info" | "success" | "warn" | "error";

@@ -31,6 +31,7 @@ const ExtractSchema = z.object({
   telefones: z.array(z.string()).optional().default([]),
   contexto: z.string().nullable().optional().default(null),
   confianca: ConfiancaLoose.default("baixa"),
+  dataReferencia: z.string().nullable().optional().default(null),
 });
 
 const NomeSchema = z.object({
@@ -38,6 +39,7 @@ const NomeSchema = z.object({
   cargo: z.string().nullable().optional().default(null),
   contexto: z.string().nullable().optional().default(null),
   confianca: ConfiancaLoose.default("baixa"),
+  dataReferencia: z.string().nullable().optional().default(null),
 });
 
 type Extracted = {
@@ -47,6 +49,7 @@ type Extracted = {
   telefones: string[];
   contexto: string | null;
   confianca: "alta" | "media" | "baixa";
+  dataReferencia: string | null;
 };
 
 type NomeOnly = {
@@ -54,6 +57,7 @@ type NomeOnly = {
   cargo: string | null;
   contexto: string | null;
   confianca: "alta" | "media" | "baixa";
+  dataReferencia: string | null;
 };
 
 type Emit = (
@@ -101,15 +105,15 @@ async function searchCandidates(
   emit: Emit,
   etapa: EtapaTag,
   withScrape = true,
+  tbs?: string,
 ): Promise<SearchCandidate[]> {
-  emit("info", etapa, `Pesquisando no Google via Firecrawl: "${query}"`);
+  const tbsLabel = tbs ? ` [filtro: ${tbs}]` : "";
+  emit("info", etapa, `Pesquisando no Google via Firecrawl${tbsLabel}: "${query}"`);
   try {
-    const res = withScrape
-      ? await fc.search(query, {
-          limit: 5,
-          scrapeOptions: { formats: ["markdown"], onlyMainContent: true },
-        })
-      : await fc.search(query, { limit: 5 });
+    const baseOpts: { limit: number; tbs?: string; scrapeOptions?: { formats: ("markdown" | "html")[]; onlyMainContent?: boolean } } = { limit: 5 };
+    if (tbs) baseOpts.tbs = tbs;
+    if (withScrape) baseOpts.scrapeOptions = { formats: ["markdown"], onlyMainContent: true };
+    const res = await fc.search(query, baseOpts as Parameters<Firecrawl["search"]>[1]);
     const web =
       (res as { web?: Array<{ url: string; title?: string; description?: string; markdown?: string }> })
         .web ?? [];
@@ -136,6 +140,19 @@ async function searchCandidates(
     emit("error", etapa, "Erro na busca do Firecrawl", String(e));
     return [];
   }
+}
+
+function dedupeCandidates(lists: SearchCandidate[][]): SearchCandidate[] {
+  const seen = new Set<string>();
+  const out: SearchCandidate[] = [];
+  for (const list of lists) {
+    for (const c of list) {
+      if (seen.has(c.url)) continue;
+      seen.add(c.url);
+      out.push(c);
+    }
+  }
+  return out;
 }
 
 function snippetsBlock(cands: SearchCandidate[]): string {
@@ -224,16 +241,24 @@ async function extractNomeWithAI(
   emit: Emit,
 ): Promise<NomeOnly | null> {
   const provider = getProvider();
+  const anoAtual = new Date().getFullYear();
   const prompt = `Você é um analista que identifica autoridades municipais a partir de páginas oficiais de ${municipio}/${uf}.
+Hoje é ${new Date().toISOString().slice(0, 10)} (ano corrente: ${anoAtual}).
 
 OBJETIVO ÚNICO desta etapa:
-  Descobrir o NOME COMPLETO do(a) Secretário(a) Municipal de Educação de ${municipio}/${uf}.
-  NÃO precisa extrair contatos agora. Foco só no nome.
+  Descobrir o NOME COMPLETO do(a) Secretário(a) Municipal de Educação ATUAL de ${municipio}/${uf}.
+  NÃO precisa extrair contatos agora. Foco só no nome ATUAL (em exercício hoje).
 
 REGRAS:
 - Só devolva um nome se ele aparecer LITERALMENTE no conteúdo abaixo, citado como responsável pela Secretaria de Educação (pode ser "Secretário(a) de Educação", "titular da Secretaria Municipal de Educação", etc.).
-- "confianca" = "alta" só se o nome estiver explicitamente associado ao cargo de Secretário(a) de Educação.
+- "confianca" = "alta" só se o nome estiver explicitamente associado ao cargo de Secretário(a) de Educação E houver indício de que é a gestão atual.
 - Se não houver nome, devolva secretario = null.
+
+REGRAS DE ATUALIDADE (CRÍTICO — a busca pode retornar dados desatualizados):
+- Se aparecer MAIS DE UM nome como Secretário(a) de Educação, escolha o mais RECENTEMENTE empossado. Pistas: "nomeado", "empossado", "tomou posse", "decreto nº ...", "a partir de DD/MM/AAAA", data mais recente.
+- Snippets do Google geralmente refletem o(a) titular ATUAL — PREFIRA-OS ao Diário Oficial quando houver conflito, A MENOS QUE o trecho do diário seja claramente mais recente (data posterior).
+- Se houver indicação de exoneração/saída/troca, IGNORE o nome anterior e use o sucessor citado.
+- Preencha "dataReferencia" com a data/mês/ano da evidência usada (ex.: "2025-11", "abril/2025", "${anoAtual}"). Se não houver data, deixe null.
 
 URL: ${url}
 ${diarioBlock}
@@ -303,11 +328,13 @@ async function extractWithAI(
 
   const fullMd = extraMarkdown ? `${extraMarkdown}\n\n### Conteúdo do site\n${markdown}` : markdown;
 
+  const anoAtual = new Date().getFullYear();
   const prompt = `Você é um analista que extrai contatos institucionais de páginas oficiais da prefeitura de ${municipio}/${uf}.
+Hoje é ${new Date().toISOString().slice(0, 10)} (ano corrente: ${anoAtual}).
 
 ALVO PRINCIPAL DO PROJETO:
   Secretaria Municipal de Educação de ${municipio}/${uf}.
-  Queremos: NOME do(a) Secretário(a) + E-MAILS e TELEFONES dela ou da Secretaria de Educação.
+  Queremos: NOME do(a) Secretário(a) ATUAL + E-MAILS e TELEFONES dela ou da Secretaria de Educação.
 
 ${nomeAlvo ? `NOME-ALVO CONFIRMADO: "${nomeAlvo}". Priorize contatos vinculados a essa pessoa.\n` : ""}
 FOCO DESTA EXTRAÇÃO (etapa = "${etapa}"):
@@ -319,6 +346,13 @@ REGRAS RÍGIDAS:
 - E-mails/telefones precisam aparecer literalmente no texto. Telefones brasileiros com DDD quando possível.
 - "confianca" = "alta" só se o alvo desta etapa estiver claramente identificado.
 - Se a página claramente não traz nada útil, devolva arrays vazios e confianca = "baixa".
+
+REGRAS DE ATUALIDADE (CRÍTICO):
+- Se aparecer MAIS DE UM nome como Secretário(a) de Educação, escolha o ATUAL — o mais recentemente empossado. Pistas: "nomeado", "empossado", "tomou posse", "decreto nº ...", data mais recente.
+- Snippets do Google (quando presentes) geralmente refletem o titular ATUAL — prefira-os ao Diário Oficial em caso de conflito, A MENOS QUE o trecho do diário seja claramente mais recente.
+- Se houver indicação de exoneração/troca, ignore o nome antigo e use o sucessor.
+- Preencha "dataReferencia" com a data/mês/ano da evidência usada (ex.: "2025-11", "abril/2025", "${anoAtual}"). Se não houver data, deixe null.
+- Em "contexto" mencione brevemente a data citada quando relevante (ex.: "Empossada em 03/2025 por decreto nº...").
 
 URL analisada: ${url}
 ${hintsBlock}
@@ -359,6 +393,7 @@ Responda APENAS com JSON válido seguindo o schema.`;
         telefones: hints.telefones.slice(0, 5),
         contexto: "IA falhou — contatos extraídos por regex da página",
         confianca: "baixa",
+        dataReferencia: null,
       };
       emit("warn", etapa, `Regex recuperou ${fallback.emails.length} e-mail(s) e ${fallback.telefones.length} tel`, fallback);
       return fallback;
@@ -380,16 +415,28 @@ function fonteLabel(etapa: Hierarquia) {
       : "Gabinete do Prefeito (último recurso)";
 }
 
-/** Tenta extrair um nome a partir dos trechos do diário oficial sem chamar IA. */
-function nomeDoDiario(excerpts: DiarioExcerpt[]): string | null {
+/** Tenta extrair um nome a partir dos trechos do diário oficial sem chamar IA.
+ *  Excerpts já vêm ordenados do mais novo para o mais antigo. */
+function nomeDoDiario(
+  excerpts: DiarioExcerpt[],
+): { nome: string; data: string; ageDays: number; conflito?: string } | null {
   if (excerpts.length === 0) return null;
   const re =
     /secret[áa]ri[oa](?:\s+municipal)?\s+(?:de\s+)?educa[çc][ãa]o[^.,;:\n]{0,30}?[,:\-–]\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+(?:de|da|do|dos|das|e)\s+|\s+)[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+){0,3})/i;
+  let escolhido: { nome: string; data: string; ageDays: number } | null = null;
+  let anterior: string | null = null;
   for (const ex of excerpts) {
     const m = ex.trecho.match(re);
-    if (m) return m[1].trim();
+    if (!m) continue;
+    const nome = m[1].trim();
+    if (!escolhido) {
+      escolhido = { nome, data: ex.data, ageDays: ex.ageDays };
+    } else if (nome.toLowerCase() !== escolhido.nome.toLowerCase() && !anterior) {
+      anterior = nome;
+    }
   }
-  return null;
+  if (!escolhido) return null;
+  return { ...escolhido, conflito: anterior ?? undefined };
 }
 
 export async function prospectar(
@@ -421,6 +468,7 @@ export async function prospectar(
   // ===== ESTÁGIO A: descobrir o NOME =====
   let nomeSecretario: string | null = null;
   let nomeFonte: "diario" | "site" | "busca-nome" | "snippet" | null = null;
+  let dataReferenciaGlobal: string | null = null;
   let urlSiteEducacao: string | null = null;
   let mdSiteEducacao: string | null = null;
   let extraConfirmado: Extracted | null = null; // se já veio contato no site institucional
@@ -429,12 +477,12 @@ export async function prospectar(
   let diarioExcerpts: DiarioExcerpt[] = [];
   let diarioPromise: Promise<void> = Promise.resolve();
   if (ibgeId) {
-    emit("info", "diario", `Consultando Querido Diário (cód. IBGE ${ibgeId})...`);
+    emit("info", "diario", `Consultando Querido Diário (cód. IBGE ${ibgeId}, últimos 6 meses)...`);
     diarioPromise = (async () => {
       const r = await buscarDiario(
         ibgeId,
         '"secretário de educação" OR "secretária de educação" OR "secretario municipal de educação"',
-        { size: 5, sinceDays: 730 },
+        { size: 5, sinceDays: 180 },
       );
       if (!r.ok) {
         emit("warn", "diario", `Diário Oficial indisponível (${r.reason}) — seguindo sem ele`);
@@ -448,28 +496,70 @@ export async function prospectar(
       emit(
         "success",
         "diario",
-        `Encontrei ${r.excerpts.length} trecho(s) no diário oficial`,
+        `Encontrei ${r.excerpts.length} trecho(s) no diário (mais novo: ${r.excerpts[0]?.data || "?"})`,
         { excerpts: r.excerpts.slice(0, 3) },
       );
       const cand = nomeDoDiario(r.excerpts);
       if (cand) {
-        nomeSecretario = cand;
-        nomeFonte = "diario";
-        emit("success", "diario", `Pista forte do diário: nome provável = ${cand}`);
+        // Só adota como nomeFonte=diario se for ≤ 365 dias (1 ano).
+        if (cand.ageDays <= 365) {
+          nomeSecretario = cand.nome;
+          nomeFonte = "diario";
+          dataReferenciaGlobal = cand.data || null;
+          emit(
+            "success",
+            "diario",
+            `Pista forte do diário (${cand.data}, há ~${Math.floor(cand.ageDays / 30)} meses): nome provável = ${cand.nome}`,
+          );
+          if (cand.conflito) {
+            emit(
+              "warn",
+              "nome",
+              `Conflito no diário: trecho mais antigo cita "${cand.conflito}" — adotando "${cand.nome}" (mais recente)`,
+            );
+          }
+        } else {
+          emit(
+            "warn",
+            "diario",
+            `Trecho do diário é antigo (${cand.data}, ~${Math.floor(cand.ageDays / 30)} meses) — vou tratar como pista fraca e exigir confirmação`,
+          );
+        }
       }
     })();
   } else {
     emit("info", "diario", "Sem código IBGE — pulando consulta ao Querido Diário");
   }
 
-  // A2: busca + scrape (em batch) do site oficial da Educação
-  emit("info", "nome", "Estágio A — descobrindo o nome do(a) Secretário(a) de Educação");
-  const candsA = await searchCandidates(
-    fc,
-    `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário nome contato`,
-    emit,
-    "nome",
-  );
+  // A2: busca + scrape (em batch) do site oficial da Educação — 3 queries focando atualidade
+  emit("info", "nome", "Estágio A — descobrindo o nome ATUAL do(a) Secretário(a) de Educação");
+  const anoAtual = new Date().getFullYear();
+  const [candsA1, candsA2, candsA3] = await Promise.all([
+    searchCandidates(
+      fc,
+      `"secretário de educação" ${municipio} ${uf} ${anoAtual}`,
+      emit,
+      "nome",
+      true,
+      "qdr:y",
+    ),
+    searchCandidates(
+      fc,
+      `secretaria municipal educação ${municipio} ${uf} "atual" OR "nomeado" OR "empossado"`,
+      emit,
+      "nome",
+      true,
+      "qdr:y",
+    ),
+    searchCandidates(
+      fc,
+      `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário nome contato`,
+      emit,
+      "nome",
+    ),
+  ]);
+  const candsA = dedupeCandidates([candsA1, candsA2, candsA3]);
+  emit("info", "nome", `Após dedupe: ${candsA.length} candidato(s) únicos das 3 buscas`);
   const rankedA = preferGov(candsA, (u) => /(educa|secretari)/i.test(u));
   const topA = rankedA[0] ?? null;
   urlSiteEducacao = topA?.url ?? null;
@@ -523,9 +613,27 @@ export async function prospectar(
       nomeSecretario,
       diarioBlock || undefined,
     );
-    if (full?.secretario && !nomeSecretario) {
+    // Detecta conflito de nome entre diário e snippet/site — prefere o "atual" (IA).
+    const prevNome = nomeSecretario as string | null;
+    if (
+      full?.secretario &&
+      prevNome &&
+      full.secretario.toLowerCase().trim() !== prevNome.toLowerCase().trim()
+    ) {
+      emit(
+        "warn",
+        "nome",
+        `Conflito de nome: diário=${prevNome} / IA(site+snippet)=${full.secretario} — adotando "${full.secretario}" por ser provavelmente o atual`,
+      );
       nomeSecretario = full.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
+    } else if (full?.secretario && !prevNome) {
+      nomeSecretario = full.secretario;
+      nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
+    } else if (full?.dataReferencia && !dataReferenciaGlobal) {
+      dataReferenciaGlobal = full.dataReferencia;
     }
     if (full && hasUsefulContact(full) && full.secretario) {
       const viaSnippet = onlySnippets;
@@ -547,6 +655,7 @@ export async function prospectar(
         fonteUrl: urlSiteEducacao,
         contexto: full.contexto ?? (viaSnippet ? "Dados extraídos do resumo dos resultados do Google." : null),
         nomeFonte: viaSnippet ? "snippet" : nomeFonte,
+        dataReferencia: full.dataReferencia ?? dataReferenciaGlobal,
       };
       onEvent?.({ kind: "final", result, ts: Date.now() });
       return result;
@@ -572,6 +681,7 @@ export async function prospectar(
     if (n?.secretario) {
       nomeSecretario = n.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
+      dataReferenciaGlobal = n.dataReferencia ?? dataReferenciaGlobal;
     }
   }
 
@@ -587,7 +697,7 @@ export async function prospectar(
       `"${nomeSecretario}" secretaria municipal educação ${municipio} contato`,
     ];
     for (const q of queries) {
-      const cands = await searchCandidates(fc, q, emit, "contato-secretario");
+      const cands = await searchCandidates(fc, q, emit, "contato-secretario", true, "qdr:y");
       const ranked = preferGov(cands);
       if (ranked.length === 0) continue;
       const inlineMd = ranked
@@ -631,6 +741,7 @@ export async function prospectar(
               ? `Contato extraído do resumo do Google em busca dirigida ("${nomeSecretario}").`
               : `Contato encontrado em busca dirigida pelo nome ("${nomeSecretario}").`),
           nomeFonte: viaSnippetB && !nomeFonte ? "snippet" : nomeFonte,
+          dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
         };
         onEvent?.({ kind: "final", result, ts: Date.now() });
         return result;
@@ -659,6 +770,7 @@ export async function prospectar(
       fonteUrl: urlSiteEducacao,
       contexto: extraConfirmado.contexto ?? "Contato institucional da Secretaria (sem vínculo direto com a pessoa).",
       nomeFonte,
+      dataReferencia: extraConfirmado.dataReferencia ?? dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
@@ -707,6 +819,7 @@ export async function prospectar(
       fonteUrl: r2.url,
       contexto: r2.ext.contexto ?? "Contato geral da prefeitura (sem dados da Educação)",
       nomeFonte: nomeSecretario ? nomeFonte : null,
+      dataReferencia: r2.ext.dataReferencia ?? dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
@@ -731,6 +844,7 @@ export async function prospectar(
       fonteUrl: r3.url,
       contexto: r3.ext.contexto ?? "Contato do gabinete do prefeito",
       nomeFonte: nomeSecretario ? nomeFonte : null,
+      dataReferencia: r3.ext.dataReferencia ?? dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
@@ -750,6 +864,7 @@ export async function prospectar(
       fonteUrl: urlSiteEducacao,
       contexto: "Nome identificado, mas não localizamos e-mail/telefone associados.",
       nomeFonte,
+      dataReferencia: dataReferenciaGlobal,
     };
     onEvent?.({ kind: "final", result, ts: Date.now() });
     return result;
