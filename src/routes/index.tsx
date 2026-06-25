@@ -1,14 +1,13 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { useServerFn } from "@tanstack/react-start";
 import { Search, Trash2, Building2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MunicipioCombobox } from "@/components/MunicipioCombobox";
 import { ResultCard, type CardState } from "@/components/ResultCard";
 import { ExportButtons } from "@/components/ExportButtons";
 import type { Municipio } from "@/lib/ibge";
-import type { ProspectResult } from "@/lib/prospect.types";
-import { prospectarMunicipio } from "@/lib/prospect.functions";
+import type { ProgressEvent, ProspectResult } from "@/lib/prospect.types";
+import { logDebug } from "@/lib/debug-log";
 import type { ExportRow } from "@/lib/export";
 
 export const Route = createFileRoute("/")({
@@ -40,18 +39,53 @@ type RunningCard = {
   slow: boolean;
 };
 
+async function streamProspect(
+  municipio: string,
+  uf: string,
+  onEvent: (evt: ProgressEvent) => void,
+): Promise<ProspectResult | null> {
+  const res = await fetch("/api/prospect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ municipio, uf }),
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let final: ProspectResult | null = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const evt = JSON.parse(trimmed) as ProgressEvent;
+        onEvent(evt);
+        if (evt.kind === "final") final = evt.result;
+      } catch (e) {
+        console.warn("Falha parse linha NDJSON", trimmed, e);
+      }
+    }
+  }
+  return final;
+}
+
 function Index() {
   const [selected, setSelected] = useState<Municipio[]>([]);
   const [cards, setCards] = useState<RunningCard[]>([]);
   const [running, setRunning] = useState(false);
-  const prospect = useServerFn(prospectarMunicipio);
   const slowTimers = useRef<Record<string, number>>({});
-  const phaseTimers = useRef<Record<string, number>>({});
 
   useEffect(() => {
     return () => {
       Object.values(slowTimers.current).forEach((t) => window.clearTimeout(t));
-      Object.values(phaseTimers.current).forEach((t) => window.clearTimeout(t));
     };
   }, []);
 
@@ -70,8 +104,8 @@ function Index() {
     setCards([]);
   }
 
-  function patchCard(key: string, patch: Partial<RunningCard>) {
-    setCards((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+  function patchCard(key: string, fn: (c: RunningCard) => RunningCard) {
+    setCards((prev) => prev.map((c) => (c.key === key ? fn(c) : c)));
   }
 
   async function startSearch() {
@@ -81,37 +115,69 @@ function Index() {
       key: `${m.id}`,
       municipio: m.nome,
       uf: m.uf,
-      state: { phase: "searching" as const },
+      state: { phase: "searching", events: [] },
       slow: false,
     }));
     setCards(initial);
 
     for (const m of selected) {
       const key = `${m.id}`;
-      // Slow warning after 30s
+      const scope = `prospect:${m.nome}/${m.uf}`;
       slowTimers.current[key] = window.setTimeout(() => {
-        setCards((prev) => prev.map((c) => (c.key === key ? { ...c, slow: true } : c)));
-      }, 30000);
-      // Switch to "Analisando..." after 3.5s
-      phaseTimers.current[key] = window.setTimeout(() => {
-        setCards((prev) =>
-          prev.map((c) =>
-            c.key === key && c.state.phase === "searching"
-              ? { ...c, state: { phase: "analyzing" } }
-              : c,
-          ),
-        );
-      }, 3500);
+        patchCard(key, (c) => ({ ...c, slow: true }));
+      }, 45000);
 
       try {
-        const result = (await prospect({ data: { municipio: m.nome, uf: m.uf } })) as ProspectResult;
-        patchCard(key, { state: { phase: "done", result }, slow: false });
+        const result = await streamProspect(m.nome, m.uf, (evt) => {
+          if (evt.kind === "progress") {
+            logDebug(evt.level, scope, evt.message, evt.data);
+            patchCard(key, (c) => {
+              const events = [...c.state.events, evt];
+              // first non-init event flips to "analyzing"
+              const phase =
+                c.state.phase === "searching" && evt.etapa !== "init"
+                  ? ("analyzing" as const)
+                  : c.state.phase;
+              if (phase === "searching" || phase === "analyzing") {
+                return { ...c, state: { phase, events } };
+              }
+              return { ...c, state: { ...c.state, events } };
+            });
+          } else {
+            logDebug(
+              evt.result.status === "found"
+                ? "success"
+                : evt.result.status === "partial"
+                  ? "warn"
+                  : "error",
+              scope,
+              `Final: ${evt.result.status} (${evt.result.fonte ?? "—"})`,
+              evt.result,
+            );
+            patchCard(key, (c) => ({
+              ...c,
+              state: { phase: "done", result: evt.result, events: [...c.state.events, evt] },
+              slow: false,
+            }));
+          }
+        });
+        if (!result) {
+          patchCard(key, (c) => ({
+            ...c,
+            state: { phase: "error", error: "Sem resposta final do servidor", events: c.state.events },
+            slow: false,
+          }));
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : "Falha ao buscar";
-        patchCard(key, { state: { phase: "error", error: message }, slow: false });
+        logDebug("error", scope, "Falha no stream", message);
+        patchCard(key, (c) => ({
+          ...c,
+          state: { phase: "error", error: message, events: c.state.events },
+          slow: false,
+        }));
       } finally {
         window.clearTimeout(slowTimers.current[key]);
-        window.clearTimeout(phaseTimers.current[key]);
       }
     }
 
@@ -131,7 +197,6 @@ function Index() {
 
   return (
     <div className="min-h-screen bg-white text-foreground">
-      {/* Header */}
       <header className="border-b border-border bg-white">
         <div className="mx-auto flex max-w-7xl items-start justify-between px-6 py-5">
           <div>
@@ -154,7 +219,6 @@ function Index() {
       </header>
 
       <main className="mx-auto grid max-w-7xl gap-6 px-6 py-8 md:grid-cols-[minmax(280px,30%)_1fr]">
-        {/* Coluna esquerda */}
         <aside className="space-y-4">
           <div className="rounded-lg border border-border bg-white p-5">
             <label className="text-sm font-medium text-foreground">
@@ -221,9 +285,17 @@ function Index() {
               </Button>
             </div>
           </div>
+
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs leading-relaxed text-slate-600">
+            <p className="font-semibold text-slate-700">Como o robô procura</p>
+            <ol className="mt-1.5 list-decimal space-y-0.5 pl-4">
+              <li>Secretaria de Educação — nome e contatos</li>
+              <li>Fallback: contato geral da prefeitura</li>
+              <li>Último recurso: gabinete do prefeito</li>
+            </ol>
+          </div>
         </aside>
 
-        {/* Área central */}
         <section className="space-y-4">
           {cards.length === 0 ? (
             <div className="flex min-h-[420px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-white p-10 text-center">
