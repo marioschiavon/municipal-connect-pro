@@ -52,13 +52,33 @@ export async function buscarDiario(
     published_since: isoDaysAgo(sinceDays),
   });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
+    "User-Agent":
+      "MunicipIA/0.5 (+prospeccao-educacao; contato via app)",
+  };
+
+  async function attempt(): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(`${BASE}?${params.toString()}`, {
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   try {
-    const res = await fetch(`${BASE}?${params.toString()}`, {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
+    let res = await attempt();
+    if (res.status === 403 || res.status === 429) {
+      // Possível rate-limit/UA — espera curta e tenta de novo uma vez.
+      await new Promise((r) => setTimeout(r, 1500));
+      res = await attempt();
+    }
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
     const json = (await res.json()) as RawResponse;
     const gazettes = json.gazettes ?? [];
@@ -78,8 +98,6 @@ export async function buscarDiario(
   } catch (e) {
     const aborted = e instanceof DOMException && e.name === "AbortError";
     return { ok: false, reason: aborted ? `timeout ${timeoutMs}ms` : String(e) };
-  } finally {
-    clearTimeout(timer);
   }
 }
 

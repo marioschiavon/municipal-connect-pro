@@ -10,17 +10,26 @@ export type ProspectResult = {
   fonte: string | null;
   fonteUrl: string | null;
   contexto: string | null;
-  /** Origem do NOME do secretário, quando aplicável ("diario" = Querido Diário). */
-  nomeFonte?: "site" | "diario" | null;
+  /** Origem do NOME do secretário, quando aplicável. */
+  nomeFonte?: "site" | "diario" | "busca-nome" | null;
 };
 
 export type ProgressLevel = "info" | "success" | "warn" | "error";
+
+export type EtapaTag =
+  | Hierarquia
+  | "init"
+  | "fallback"
+  | "final"
+  | "diario"
+  | "nome"
+  | "contato-secretario";
 
 export type ProgressEvent =
   | {
       kind: "progress";
       level: ProgressLevel;
-      etapa: Hierarquia | "init" | "fallback" | "final" | "diario";
+      etapa: EtapaTag;
       message: string;
       data?: unknown;
       ts: number;
