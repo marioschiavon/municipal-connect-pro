@@ -67,6 +67,12 @@ function StatusPill({ state }: { state: CardState }) {
         <XCircle className="h-3 w-3" /> Erro
       </span>
     );
+  if (state.phase === "canceled")
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+        <XCircle className="h-3 w-3" /> Cancelado
+      </span>
+    );
   const r = state.result;
   if (r.status === "found")
     return (
