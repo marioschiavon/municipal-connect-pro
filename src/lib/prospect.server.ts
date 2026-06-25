@@ -500,8 +500,14 @@ export async function prospectar(
     emit("info", "nome", "Sem markdown da página — vou extrair nome/contatos direto dos snippets do Google");
   }
 
-  // Espera o diário terminar antes de montar prompt
-  await diarioPromise;
+  // Espera o diário no máximo 6s — se travar, segue sem ele.
+  const diarioTimeout = new Promise<"timeout">((resolve) =>
+    setTimeout(() => resolve("timeout"), 6_000),
+  );
+  const raced = await Promise.race([diarioPromise.then(() => "done" as const), diarioTimeout]);
+  if (raced === "timeout") {
+    emit("warn", "diario", "Querido Diário demorou demais — seguindo sem ele");
+  }
   const diarioBlock = formatExcerptsForPrompt(diarioExcerpts);
 
   // A3: tenta extração COMPLETA (snippets + markdown) — atalho feliz
