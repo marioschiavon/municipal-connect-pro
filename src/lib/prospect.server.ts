@@ -328,11 +328,13 @@ async function extractWithAI(
 
   const fullMd = extraMarkdown ? `${extraMarkdown}\n\n### Conteúdo do site\n${markdown}` : markdown;
 
+  const anoAtual = new Date().getFullYear();
   const prompt = `Você é um analista que extrai contatos institucionais de páginas oficiais da prefeitura de ${municipio}/${uf}.
+Hoje é ${new Date().toISOString().slice(0, 10)} (ano corrente: ${anoAtual}).
 
 ALVO PRINCIPAL DO PROJETO:
   Secretaria Municipal de Educação de ${municipio}/${uf}.
-  Queremos: NOME do(a) Secretário(a) + E-MAILS e TELEFONES dela ou da Secretaria de Educação.
+  Queremos: NOME do(a) Secretário(a) ATUAL + E-MAILS e TELEFONES dela ou da Secretaria de Educação.
 
 ${nomeAlvo ? `NOME-ALVO CONFIRMADO: "${nomeAlvo}". Priorize contatos vinculados a essa pessoa.\n` : ""}
 FOCO DESTA EXTRAÇÃO (etapa = "${etapa}"):
@@ -344,6 +346,13 @@ REGRAS RÍGIDAS:
 - E-mails/telefones precisam aparecer literalmente no texto. Telefones brasileiros com DDD quando possível.
 - "confianca" = "alta" só se o alvo desta etapa estiver claramente identificado.
 - Se a página claramente não traz nada útil, devolva arrays vazios e confianca = "baixa".
+
+REGRAS DE ATUALIDADE (CRÍTICO):
+- Se aparecer MAIS DE UM nome como Secretário(a) de Educação, escolha o ATUAL — o mais recentemente empossado. Pistas: "nomeado", "empossado", "tomou posse", "decreto nº ...", data mais recente.
+- Snippets do Google (quando presentes) geralmente refletem o titular ATUAL — prefira-os ao Diário Oficial em caso de conflito, A MENOS QUE o trecho do diário seja claramente mais recente.
+- Se houver indicação de exoneração/troca, ignore o nome antigo e use o sucessor.
+- Preencha "dataReferencia" com a data/mês/ano da evidência usada (ex.: "2025-11", "abril/2025", "${anoAtual}"). Se não houver data, deixe null.
+- Em "contexto" mencione brevemente a data citada quando relevante (ex.: "Empossada em 03/2025 por decreto nº...").
 
 URL analisada: ${url}
 ${hintsBlock}
