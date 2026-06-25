@@ -105,15 +105,15 @@ async function searchCandidates(
   emit: Emit,
   etapa: EtapaTag,
   withScrape = true,
+  tbs?: string,
 ): Promise<SearchCandidate[]> {
-  emit("info", etapa, `Pesquisando no Google via Firecrawl: "${query}"`);
+  const tbsLabel = tbs ? ` [filtro: ${tbs}]` : "";
+  emit("info", etapa, `Pesquisando no Google via Firecrawl${tbsLabel}: "${query}"`);
   try {
-    const res = withScrape
-      ? await fc.search(query, {
-          limit: 5,
-          scrapeOptions: { formats: ["markdown"], onlyMainContent: true },
-        })
-      : await fc.search(query, { limit: 5 });
+    const baseOpts: { limit: number; tbs?: string; scrapeOptions?: { formats: ("markdown" | "html")[]; onlyMainContent?: boolean } } = { limit: 5 };
+    if (tbs) baseOpts.tbs = tbs;
+    if (withScrape) baseOpts.scrapeOptions = { formats: ["markdown"], onlyMainContent: true };
+    const res = await fc.search(query, baseOpts as Parameters<Firecrawl["search"]>[1]);
     const web =
       (res as { web?: Array<{ url: string; title?: string; description?: string; markdown?: string }> })
         .web ?? [];
@@ -140,6 +140,19 @@ async function searchCandidates(
     emit("error", etapa, "Erro na busca do Firecrawl", String(e));
     return [];
   }
+}
+
+function dedupeCandidates(lists: SearchCandidate[][]): SearchCandidate[] {
+  const seen = new Set<string>();
+  const out: SearchCandidate[] = [];
+  for (const list of lists) {
+    for (const c of list) {
+      if (seen.has(c.url)) continue;
+      seen.add(c.url);
+      out.push(c);
+    }
+  }
+  return out;
 }
 
 function snippetsBlock(cands: SearchCandidate[]): string {
