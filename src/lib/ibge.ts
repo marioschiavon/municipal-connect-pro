@@ -15,13 +15,17 @@ export async function loadMunicipios(): Promise<Municipio[]> {
       "https://servicodados.ibge.gov.br/api/v1/localidades/municipios?orderBy=nome",
     );
     if (!res.ok) throw new Error("Falha ao carregar municípios do IBGE");
-    const data = await res.json();
-    cache = data.map((m: { id: number; nome: string; microrregiao: { mesorregiao: { UF: { sigla: string } } } }) => ({
-      id: m.id,
-      nome: m.nome,
-      uf: m.microrregiao.mesorregiao.UF.sigla,
-    }));
-    return cache!;
+    const data = (await res.json()) as Array<Record<string, any>>;
+    const out: Municipio[] = [];
+    for (const m of data) {
+      const uf: string | undefined =
+        m?.["regiao-imediata"]?.["regiao-intermediaria"]?.UF?.sigla ??
+        m?.microrregiao?.mesorregiao?.UF?.sigla;
+      if (!uf || typeof m.id !== "number" || typeof m.nome !== "string") continue;
+      out.push({ id: m.id, nome: m.nome, uf });
+    }
+    cache = out;
+    return cache;
   })();
   return inflight;
 }
