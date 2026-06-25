@@ -8,6 +8,7 @@ import { ExportButtons } from "@/components/ExportButtons";
 import type { Municipio } from "@/lib/ibge";
 import type { ProgressEvent, ProspectResult } from "@/lib/prospect.types";
 import { logDebug } from "@/lib/debug-log";
+import { APP_VERSION } from "@/lib/version";
 import type { ExportRow } from "@/lib/export";
 
 export const Route = createFileRoute("/")({
@@ -250,7 +251,7 @@ function Index() {
                 aria-label="Abrir debug (secreto)"
                 className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700 transition hover:border-amber-300 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
               >
-                Alpha v0.1
+                {APP_VERSION}
               </Link>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
