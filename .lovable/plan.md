@@ -1,71 +1,55 @@
-## Objetivo
+## Problema
 
-Trocar a estratégia atual de "um único scrape resolve tudo" por uma **busca escalonada em estágios**: primeiro descobrir o **nome** do(a) Secretário(a) de Educação; com o nome em mãos, fazer **novas buscas direcionadas** atrás dos contatos pessoais/institucionais; e só depois cair para os fallbacks (geral → gabinete). Também corrigir o erro 403 do Querido Diário.
+No teste do Maringá, o Firecrawl `search()` retornou 6 resultados — mas nós só usamos a `url` do primeiro e descartamos os campos `title` e `description` (os snippets do Google). Quando a página alvo falha no scrape (foi o caso: `ERR_TUNNEL_CONNECTION_FAILED` no Firecrawl + `fetch failed` no nativo), a pipeline fica sem matéria-prima e cai direto pro fallback institucional — mesmo quando a resposta já estava visível na própria SERP.
 
-## Novo fluxo (escalonado)
+Outro ponto: o Firecrawl `search()` aceita `scrapeOptions: { formats: ['markdown'] }` e devolve o **markdown de vários resultados de uma vez**. Hoje fazemos N requisições sequenciais (search → scrape um → scrape outro). Isso é caro e frágil.
 
-```text
-Estágio A — DESCOBRIR NOME
-  A1. Querido Diário (com User-Agent correto + tratamento de 403)
-  A2. Google: "secretário de educação <Município> <UF>" → 1º scrape
-       └─ IA extrai SÓ o nome (sem exigir contato ainda)
-  A3. Se já vieram contatos úteis: pula tudo, retorna como hoje (atalho feliz)
+## Plano (Alpha v0.6 → Alpha v0.7)
 
-Estágio B — CONTATOS DO SECRETÁRIO (só se temos nome)
-  B1. Google: "<Nome> secretário educação <Município> e-mail telefone"
-  B2. Google: "<Nome> secretaria municipal educação <Município> contato"
-  → scrape do melhor resultado, IA extrai e-mail/telefone vinculados ao nome
-  Para no primeiro que devolver contato útil.
+### 1. Aproveitar os snippets do Google como fonte de extração
 
-Estágio C — CONTATO INSTITUCIONAL DA SECRETARIA (sem precisar de nome)
-  C1. Site oficial da Secretaria de Educação no portal .gov.br
-       (mantém a busca atual de hoje)
+`src/lib/prospect.server.ts`
 
-Estágio D — FALLBACK GERAL
-  D1. Contato geral da prefeitura (igual hoje)
-  D2. Gabinete do prefeito (igual hoje)
-```
+- Refatorar `searchFirstUrl` em `searchCandidates` que devolve a **lista completa** dos resultados (`url`, `title`, `description`), não só uma URL.
+- Concatenar `title + description` de TODOS os candidatos em um bloco "Resultados do Google" e mandar pra IA como fonte adicional — antes mesmo de scrapear qualquer página.
+- Se os snippets já contêm nome + e-mail/telefone com confiança alta, encerra a etapa sem precisar baixar página nenhuma.
 
-A primeira etapa que devolver `nome + (email OU telefone)` encerra a busca. Se só conseguir nome, registra como `partial` com a fonte usada.
+### 2. Search com scrape em batch (uma chamada só)
 
-## Mudanças por arquivo
+- Trocar `fc.search(q, { limit: 6 })` por `fc.search(q, { limit: 5, scrapeOptions: { formats: ['markdown'], onlyMainContent: true } })`.
+- Isso traz o markdown dos top-N resultados de uma vez, sem novas idas e voltas. Resolve o caso "site oficial caiu mas tem outro .gov.br/portal com o mesmo conteúdo".
+- O bloco enviado pra IA passa a ser: snippets + markdown agregado dos candidatos (truncado por candidato pra caber no contexto).
 
-**`src/lib/querido-diario.server.ts`**
-- Adicionar `User-Agent` ("MunicipIA/0.5 (+contato)") e `Accept-Language: pt-BR` no fetch (API bloqueia clientes sem UA → causa do HTTP 403).
-- Em 403/429, fazer 1 retry com backoff de 1.5s antes de desistir.
-- Manter retorno `{ok:false, reason}` para que o resto do fluxo siga normalmente.
+### 3. Tentar múltiplos candidatos, não só o primeiro
 
-**`src/lib/prospect.server.ts`** (refator do orquestrador)
-- Separar `extractWithAI` em dois modos:
-  - `mode: "nome"` — schema reduzido `{ secretario, cargo, confianca }`, prompt focado só em identificar a pessoa.
-  - `mode: "contato"` — schema completo, prompt instruído a vincular contatos a um **nome alvo** passado por parâmetro.
-- Nova função `descobrirNome(municipio, uf, diarioExcerpts, emit)`:
-  - Roda Querido Diário (já temos) + busca Google leve + 1 scrape.
-  - Retorna `{ nome, fonte: "diario"|"site", url? } | null`.
-- Nova função `buscarContatosDoSecretario(nome, municipio, uf, emit)`:
-  - Executa as 2 queries do Estágio B em sequência, parando no primeiro resultado útil.
-- Reescrever `prospectar()` para orquestrar A → B → C → D, agregando o melhor resultado parcial ao final.
-- `ProspectResult.nomeFonte` passa a refletir corretamente a origem real (`"diario" | "site" | "busca-nome"`).
+- Hoje pegamos `preferred ?? web[0]` e paramos. Vamos iterar pelos top 3 .gov.br/portais, juntar o markdown que conseguirmos, e só desistir se TODOS falharem.
+- Pula candidatos do Instagram/Facebook (já que o regex não acha contato útil lá).
 
-**`src/lib/prospect.types.ts`**
-- Adicionar etapas novas ao `ProgressEvent.etapa`: `"nome"` e `"contato-secretario"` (mantém as antigas).
-- Expandir `nomeFonte` com `"busca-nome"`.
+### 4. Fallback final: extrair só dos snippets
 
-**`src/routes/index.tsx`** (sidebar "Como o robô procura")
-- Atualizar o texto explicativo para refletir o novo fluxo escalonado em 4 estágios (A/B/C/D em linguagem simples).
+- Se TODOS os scrapes falharem, ainda assim chama a IA com APENAS os snippets do Google. Marca o resultado como `partial` com `contexto: "Dados extraídos do resumo do Google (página não acessível)"`.
+- É exatamente o que aconteceria no Maringá: snippet do `maringa.pr.gov.br/secretarias/secretaria-de-educacao/2` provavelmente já traz nome e telefone.
 
-**`src/components/ResultCard.tsx`**
-- Mapear ícones/labels das novas etapas (`nome`, `contato-secretario`) para a timeline ao vivo.
+### 5. UI: pequeno indicador da origem
 
-**`src/lib/version.ts`**
-- Bump para **Alpha v0.5** (mudança funcional relevante; sem subir para v1.0).
+`src/components/ResultCard.tsx`
 
-## Resposta sobre o erro do Querido Diário
+- Quando `nomeFonte === "snippet"` ou contexto contém "resumo do Google", mostrar badge `via snippet do Google` (mesma cor neutra do badge "via Diário Oficial" que já existe).
 
-O `HTTP 403` veio porque a API pública do Querido Diário rejeita requisições sem `User-Agent` identificável (política anti-scraping padrão deles). Não é a chave que faltou — a API é aberta. A correção é adicionar o header `User-Agent` e `Accept-Language`, com um retry curto para o caso de rate-limit transitório. Se mesmo assim falhar, o fluxo segue sem o diário (já é tratado como opcional).
+### 6. Versão
 
-## Fora de escopo
+`src/lib/version.ts`: `Alpha v0.6` → `Alpha v0.7`.
 
-- Não vamos tocar no scraper nativo nem na lógica de fallback Firecrawl (estável agora).
-- Sem mudança de banco de dados / sem novas dependências.
-- Sem migrar para v1.0.
+## Detalhes técnicos
+
+- A SDK do Firecrawl tipa `search()` retornando `{ web: Array<{ url, title?, description?, markdown? }> }`. Acessamos `markdown` quando passamos `scrapeOptions`.
+- Limite de contexto: cortar cada `markdown` de candidato em ~6k chars; snippets ficam inteiros (são curtos).
+- Manter o cache local da v0.6 — ele já evita refazer essa busca toda quando o resultado é bom.
+- Manter o fluxo escalonado A→B→C→D; a mudança é só DENTRO de cada estágio (como a etapa consome os resultados do Firecrawl).
+- Telemetria: novo evento `info` "Snippets do Google: N candidatos com texto útil" + log dos primeiros 200 chars de cada snippet em `/debug`.
+
+## Não vou mexer
+
+- Querido Diário (o 403 do Maringá é intermitente — já tem retry + User-Agent na v0.5).
+- Cache local (segue como está).
+- Schema da IA (`ExtractSchema`/`NomeSchema`) — só muda o conteúdo do prompt.
