@@ -9,6 +9,7 @@ import type { Municipio } from "@/lib/ibge";
 import type { ProgressEvent, ProspectResult } from "@/lib/prospect.types";
 import { logDebug } from "@/lib/debug-log";
 import { APP_VERSION } from "@/lib/version";
+import { getCached, setCached, clearCache, listCached } from "@/lib/result-cache";
 import type { ExportRow } from "@/lib/export";
 
 export const Route = createFileRoute("/")({
@@ -85,9 +86,15 @@ function Index() {
   const [selected, setSelected] = useState<Municipio[]>([]);
   const [cards, setCards] = useState<RunningCard[]>([]);
   const [running, setRunning] = useState(false);
+  const [forceRefresh, setForceRefresh] = useState(false);
+  const [cacheCount, setCacheCount] = useState(0);
   const slowTimers = useRef<Record<string, number>>({});
   const abortRef = useRef<AbortController | null>(null);
   const canceledRef = useRef(false);
+
+  useEffect(() => {
+    setCacheCount(listCached().length);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -150,6 +157,38 @@ function Index() {
         continue;
       }
 
+      // === CACHE: tentar servir do localStorage antes de bater na rede ===
+      if (!forceRefresh) {
+        const cached = getCached(m.id);
+        if (cached) {
+          const ageMin = Math.round((Date.now() - cached.savedAt) / 60000);
+          const cacheEvt: ProgressEvent = {
+            kind: "progress",
+            level: "success",
+            etapa: "init",
+            message: `Cache local: resultado de ${cached.date} (há ${ageMin} min) — sem nova consulta`,
+            data: { savedAt: cached.savedAt },
+            ts: Date.now(),
+          };
+          const finalEvt: ProgressEvent = {
+            kind: "final",
+            result: cached.result,
+            ts: Date.now(),
+          };
+          logDebug("success", scope, cacheEvt.message);
+          patchCard(key, (c) => ({
+            ...c,
+            state: {
+              phase: "done",
+              result: cached.result,
+              events: [...c.state.events, cacheEvt, finalEvt],
+            },
+            slow: false,
+          }));
+          continue;
+        }
+      }
+
       slowTimers.current[key] = window.setTimeout(() => {
         patchCard(key, (c) => ({ ...c, slow: true }));
       }, 45000);
@@ -180,6 +219,15 @@ function Index() {
               `Final: ${evt.result.status} (${evt.result.fonte ?? "—"})`,
               evt.result,
             );
+            // Salva no cache local (somente resultados não-vazios)
+            if (evt.result.status !== "not_found") {
+              try {
+                setCached(m.id, m.nome, m.uf, evt.result);
+                setCacheCount(listCached().length);
+              } catch (e) {
+                console.warn("Falha ao salvar cache", e);
+              }
+            }
             patchCard(key, (c) => ({
               ...c,
               state: { phase: "done", result: evt.result, events: [...c.state.events, evt] },
@@ -340,6 +388,42 @@ function Index() {
               </Button>
             </div>
 
+            <div className="mt-4 rounded-md border border-slate-200 bg-slate-50/60 p-3 text-xs text-slate-700">
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={forceRefresh}
+                  onChange={(e) => setForceRefresh(e.target.checked)}
+                  disabled={running}
+                  className="mt-0.5 h-3.5 w-3.5 cursor-pointer"
+                />
+                <span>
+                  <span className="font-medium">Forçar nova busca</span>
+                  <span className="block text-[11px] text-slate-500">
+                    Ignora o cache local e refaz tudo, mesmo que já tenha buscado hoje.
+                  </span>
+                </span>
+              </label>
+              <div className="mt-2 flex items-center justify-between border-t border-slate-200 pt-2 text-[11px] text-slate-500">
+                <span>
+                  {cacheCount > 0
+                    ? `${cacheCount} resultado(s) em cache (24h)`
+                    : "Cache vazio"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearCache();
+                    setCacheCount(0);
+                  }}
+                  disabled={running || cacheCount === 0}
+                  className="text-slate-600 underline-offset-2 hover:text-slate-900 hover:underline disabled:opacity-50 disabled:no-underline"
+                >
+                  Limpar cache
+                </button>
+              </div>
+            </div>
+
           </div>
 
           <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs leading-relaxed text-slate-600">
@@ -350,6 +434,9 @@ function Index() {
               <li><b>C.</b> Contato institucional da Secretaria de Educação (fallback)</li>
               <li><b>D.</b> Último recurso: contato geral da prefeitura → gabinete do prefeito</li>
             </ol>
+            <p className="mt-2 text-[11px] text-slate-500">
+              💾 Resultados ficam em <b>cache local</b> por 24h por município — repetir a mesma busca no mesmo dia é instantâneo.
+            </p>
           </div>
 
         </aside>
