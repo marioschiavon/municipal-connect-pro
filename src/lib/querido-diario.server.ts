@@ -40,7 +40,7 @@ export async function buscarDiario(
 ): Promise<DiarioBusca> {
   const size = opts.size ?? 5;
   const sinceDays = opts.sinceDays ?? 730; // ~24 meses
-  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const timeoutMs = opts.timeoutMs ?? 5_000;
 
   const params = new URLSearchParams({
     territory_ids: String(ibgeId),
@@ -55,30 +55,16 @@ export async function buscarDiario(
   const headers: Record<string, string> = {
     Accept: "application/json",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
-    "User-Agent":
-      "MunicipIA/0.5 (+prospeccao-educacao; contato via app)",
+    "User-Agent": "MunicipIA/0.9 (+prospeccao-educacao; contato via app)",
   };
 
-  async function attempt(): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(`${BASE}?${params.toString()}`, {
-        headers,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    let res = await attempt();
-    if (res.status === 403 || res.status === 429) {
-      // Possível rate-limit/UA — espera curta e tenta de novo uma vez.
-      await new Promise((r) => setTimeout(r, 1500));
-      res = await attempt();
-    }
+    const res = await fetch(`${BASE}?${params.toString()}`, {
+      headers,
+      signal: controller.signal,
+    });
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
     const json = (await res.json()) as RawResponse;
     const gazettes = json.gazettes ?? [];
