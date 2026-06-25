@@ -1,78 +1,74 @@
-## Objetivo
-1. Reduzir custo/dependência do Firecrawl no scrape, mantendo-o só para a busca e como rede de segurança quando o fetch nativo falhar.
-2. Introduzir versionamento automático visível no badge do cabeçalho.
+## O que aconteceu
 
----
+Nos logs do console aparece, nas 3 etapas (Educação, Geral, Gabinete) de Umuarama/PR:
 
-## Parte 1 — Scraper próprio
-
-### 1.1 Novo módulo `src/lib/scraper.server.ts`
-Scraper rodando no Worker (fetch nativo + parsing puro, sem deps novas):
-
-- `fetchHtml(url, { timeoutMs, emit })`: `fetch` com `AbortController` (timeout 12s), `User-Agent` de navegador, `Accept-Language: pt-BR`, segue até 5 redirects manualmente, valida `content-type` text/html, lê no máx. ~1.5MB.
-- `htmlToMarkdown(html)`: pipeline em regex —
-  - remove `<script>`, `<style>`, `<noscript>`, comentários
-  - extrai `<title>` e `<meta name="description">` num header
-  - converte `<a href>` → `[texto](href)` (preserva mailto/tel)
-  - converte `<br>`, `<p>`, `<li>`, `<h1-6>` em quebras/marcadores
-  - decodifica entidades HTML
-  - colapsa whitespace, limita a ~25k chars
-- `extractContactsRegex(text)`: extra — captura e-mails e telefones BR, devolve listas únicas pra IA cruzar.
-
-Compatível com Workers — sem `cheerio`/`jsdom`.
-
-### 1.2 Atualizar `src/lib/prospect.server.ts`
-Em `scrapeMarkdown(fc, url, emit, etapa)`:
-1. Emite `scrape_start`.
-2. Tenta `fetchHtml` + `htmlToMarkdown`.
-   - Sucesso (markdown ≥ 200 chars úteis): emite `scrape_done { via: "native", bytes }` e retorna.
-   - Falha (timeout, status≠2xx, content-type errado, markdown vazio, exceção): emite `scrape_fallback { reason }` e cai pro Firecrawl atual.
-3. `searchFirstUrl` (Firecrawl `search`) permanece intacto.
-
-Pistas do regex anexadas ao prompt da IA pra reduzir alucinação; schema de saída inalterado.
-
-### 1.3 UI/Debug
-- `ResultCard` timeline: "Baixando página direto…", "Página baixada (12 KB)", "Bloqueado, usando Firecrawl…".
-- `/debug` recebe os eventos via `logDebug` automaticamente.
-- Sem mudança em `ProspectResult` nem na exportação.
-
----
-
-## Parte 2 — Versionamento automático
-
-### 2.1 Novo arquivo `src/lib/version.ts`
-```ts
-export const APP_VERSION = "Alpha v0.2";
 ```
-Fonte única usada pelo header e pelo `/debug`. **Regra fixa: nunca bumpar para `v1.0` sem autorização explícita do usuário.** Comentário no topo do arquivo deixa isso explícito.
+AI_NoObjectGeneratedError: No object generated: response did not match schema.
+```
 
-### 2.2 Política de bump
-A cada turno que envolver alteração funcional de código (não conta correção de typo/comentário), o agente incrementa o patch:
-- `Alpha v0.1` → `Alpha v0.2` → `Alpha v0.3` → … `Alpha v0.9` → `Alpha v0.10` → `Alpha v0.11` …
-- Permanece `Alpha` indefinidamente.
-- Transição para `v1.0` (ou Beta) **só sob comando explícito** do usuário.
+Conferi os logs do AI Gateway dos mesmos horários (22:32:55, 22:33:00, 22:33:04). **Os 3 retornaram HTTP 200** — ou seja, o gateway e o Gemini 3 Flash responderam normalmente (1126, 188 e 120 tokens de saída). O erro **não é** rate limit, créditos, chave inválida ou timeout.
 
-Esta entrega já bumpa para **`Alpha v0.2`** (scraper próprio).
+O erro acontece **do lado do AI SDK**, depois da resposta chegar: o texto que o Gemini devolveu não passou na validação do schema Zod que pedimos via `experimental_output: Output.object({ schema: ExtractSchema })` em `src/lib/prospect.server.ts:214-218`.
 
-### 2.3 Consumo
-- `src/routes/index.tsx`: badge no header passa a importar `APP_VERSION` em vez de string literal.
-- `src/routes/debug.tsx`: mostra a versão atual no topo da tela de debug.
+## Por que está falhando
 
-### 2.4 Memória
-Salvar em `mem://constraints/versioning.md` a regra "nunca subir para v1.0 sem autorização" + a regra de bump por turno funcional, e referenciar no `mem://index.md` (Core).
+`generateText` + `experimental_output` é uma rota experimental do AI SDK: ela injeta instruções de JSON no prompt e tenta fazer `JSON.parse` + Zod no texto bruto. Com Gemini 3 Flash isso quebra em três cenários comuns, e os 3 estão batendo no nosso caso:
 
----
+1. **Resposta de 1126 tokens na 1ª chamada** (Educação, página de 25k chars com dezenas de e-mails de CMEIs) — o modelo provavelmente devolveu raciocínio + JSON, ou um array grande embrulhado em ```json ... ```, e o parser do `experimental_output` não tolera prefixo/sufixo.
+2. **Enum estrito** (`confianca: "alta" | "media" | "baixa"`) — Gemini às vezes devolve `"média"` (com acento) ou `"medium"`, e o Zod rejeita.
+3. **Campos `nullable`** — Gemini às vezes omite a chave em vez de mandar `null`, e o Zod rejeita.
 
-## Arquivos
-- **novo**: `src/lib/scraper.server.ts`
-- **novo**: `src/lib/version.ts`
-- **novo**: `mem://constraints/versioning.md` + update `mem://index.md`
-- **edit**: `src/lib/prospect.server.ts` (só `scrapeMarkdown` + emits)
-- **edit**: `src/components/ResultCard.tsx` (rótulos dos novos eventos)
-- **edit**: `src/routes/index.tsx` (importa `APP_VERSION`)
-- **edit**: `src/routes/debug.tsx` (mostra `APP_VERSION`)
+Como `extractWithAI` retorna `null` quando isso acontece, `hasUsefulContact` vira `false` e cai pro próximo fallback — mesmo a página tendo `gabinete@umuarama.pr.gov.br` literal nas pistas regex. Foi isso que você viu: "Não encontrei nada utilizável em nenhuma das três etapas", mesmo com o regex já tendo achado os contatos.
 
-## Riscos
-- Sites `.gov.br` com Cloudflare/anti-bot retornam 403 → cai pro Firecrawl (esperado).
-- HTML→Markdown por regex perde tabelas complexas; aceitável pro alvo (e-mails/telefones).
-- SPAs sem conteúdo no HTML inicial → markdown vazio → fallback Firecrawl.
+## Plano de correção (Alpha v0.2 → v0.3)
+
+### 1. Trocar `generateText + experimental_output` por `generateObject`
+Em `src/lib/prospect.server.ts`, função `extractWithAI`:
+- Importar `generateObject` de `"ai"`.
+- Substituir a chamada por:
+  ```ts
+  const { object } = await generateObject({
+    model: provider("google/gemini-3-flash-preview"),
+    schema: ExtractSchema,
+    prompt,
+  });
+  ```
+- `generateObject` usa o modo JSON nativo do provider (mais robusto que o `experimental_output`) e já trata o caso de texto wrapper em ```json.
+
+### 2. Afrouxar o schema para reduzir rejeições falsas
+- `emails` e `telefones`: `.array(z.string()).default([])` para que a chave possa vir ausente.
+- `confianca`: aceitar variações comuns — `z.enum([...]).or(z.string().transform(s => normalizeConfianca(s)))` mapeando "média"/"medium"/"high" etc. para os 3 valores canônicos.
+- `secretario`, `cargo`, `contexto`: `.nullable().optional().default(null)`.
+
+### 3. Fallback de emergência: usar as pistas regex
+Se mesmo com `generateObject` a chamada falhar (catch), em vez de devolver `null` direto, montar um `Extracted` mínimo a partir de `extractContactsRegex(markdown)` com `confianca: "baixa"` e `contexto: "IA falhou — contatos extraídos por regex da página"`. Isso evita perder dados quando o regex já tinha visto `gabinete@umuarama.pr.gov.br`.
+
+### 4. Reforçar o prompt
+- Adicionar no final: `Responda APENAS com JSON válido, sem comentários, sem markdown, sem \`\`\`json.`
+- Reduzir o `markdown.slice(0, 18000)` para `slice(0, 12000)` na etapa Educação quando a página é gigante (caso Umuarama 25k chars), para diminuir alucinação/raciocínio extenso.
+
+### 5. Melhorar o log de erro no /debug
+Hoje o emit mostra só `String(e)`. Trocar por algo como:
+```ts
+emit("error", etapa, "Erro na IA: schema não bateu", {
+  message: e.message,
+  cause: e.cause?.message,
+  rawText: e.text?.slice(0, 500), // quando NoObjectGeneratedError, o SDK expõe .text
+});
+```
+Assim, no /debug você vê o JSON cru que o Gemini devolveu e a gente confirma o motivo real da rejeição.
+
+### 6. Bump de versão
+`src/lib/version.ts`: `Alpha v0.2` → `Alpha v0.3`.
+
+## O que NÃO vou mexer
+
+- Hierarquia de fallback (Educação → Geral → Gabinete) — está correta.
+- Scraper nativo + Firecrawl — funcionou, baixou as 3 páginas.
+- UI / streaming / cancelamento.
+
+## Resultado esperado
+
+Rodando Umuarama/PR de novo:
+- Etapa Educação: IA deve devolver `educacao@umuarama.pr.gov.br` + telefone (44) 2030-4050 com confiança alta → card finaliza no 1º passo, sem fallback.
+- Se mesmo assim a IA falhar pontualmente, o card cai pro fallback regex e mostra os e-mails que já estavam nas pistas, em vez de "not_found".
