@@ -614,20 +614,21 @@ export async function prospectar(
       diarioBlock || undefined,
     );
     // Detecta conflito de nome entre diário e snippet/site — prefere o "atual" (IA).
+    const prevNome = nomeSecretario as string | null;
     if (
       full?.secretario &&
-      nomeSecretario &&
-      full.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()
+      prevNome &&
+      full.secretario.toLowerCase().trim() !== prevNome.toLowerCase().trim()
     ) {
       emit(
         "warn",
         "nome",
-        `Conflito de nome: diário=${nomeSecretario} / IA(site+snippet)=${full.secretario} — adotando "${full.secretario}" por ser provavelmente o atual`,
+        `Conflito de nome: diário=${prevNome} / IA(site+snippet)=${full.secretario} — adotando "${full.secretario}" por ser provavelmente o atual`,
       );
       nomeSecretario = full.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
       dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
-    } else if (full?.secretario && !nomeSecretario) {
+    } else if (full?.secretario && !prevNome) {
       nomeSecretario = full.secretario;
       nomeFonte = onlySnippets ? "snippet" : "site";
       dataReferenciaGlobal = full.dataReferencia ?? dataReferenciaGlobal;
