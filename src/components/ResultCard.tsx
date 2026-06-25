@@ -178,6 +178,12 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
         <p className="mt-3 text-sm text-red-700">{state.error}</p>
       )}
 
+      {state.phase === "canceled" && (
+        <p className="mt-3 text-sm text-slate-600">
+          Busca cancelada pelo usuário antes da conclusão.
+        </p>
+      )}
+
       <Timeline events={state.events} live={live} />
 
       {result && (
