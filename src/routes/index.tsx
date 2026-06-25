@@ -9,6 +9,7 @@ import type { Municipio } from "@/lib/ibge";
 import type { ProgressEvent, ProspectResult } from "@/lib/prospect.types";
 import { logDebug } from "@/lib/debug-log";
 import { APP_VERSION } from "@/lib/version";
+import { getCached, setCached, clearCache, listCached } from "@/lib/result-cache";
 import type { ExportRow } from "@/lib/export";
 
 export const Route = createFileRoute("/")({
