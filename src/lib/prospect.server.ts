@@ -241,16 +241,24 @@ async function extractNomeWithAI(
   emit: Emit,
 ): Promise<NomeOnly | null> {
   const provider = getProvider();
+  const anoAtual = new Date().getFullYear();
   const prompt = `Você é um analista que identifica autoridades municipais a partir de páginas oficiais de ${municipio}/${uf}.
+Hoje é ${new Date().toISOString().slice(0, 10)} (ano corrente: ${anoAtual}).
 
 OBJETIVO ÚNICO desta etapa:
-  Descobrir o NOME COMPLETO do(a) Secretário(a) Municipal de Educação de ${municipio}/${uf}.
-  NÃO precisa extrair contatos agora. Foco só no nome.
+  Descobrir o NOME COMPLETO do(a) Secretário(a) Municipal de Educação ATUAL de ${municipio}/${uf}.
+  NÃO precisa extrair contatos agora. Foco só no nome ATUAL (em exercício hoje).
 
 REGRAS:
 - Só devolva um nome se ele aparecer LITERALMENTE no conteúdo abaixo, citado como responsável pela Secretaria de Educação (pode ser "Secretário(a) de Educação", "titular da Secretaria Municipal de Educação", etc.).
-- "confianca" = "alta" só se o nome estiver explicitamente associado ao cargo de Secretário(a) de Educação.
+- "confianca" = "alta" só se o nome estiver explicitamente associado ao cargo de Secretário(a) de Educação E houver indício de que é a gestão atual.
 - Se não houver nome, devolva secretario = null.
+
+REGRAS DE ATUALIDADE (CRÍTICO — a busca pode retornar dados desatualizados):
+- Se aparecer MAIS DE UM nome como Secretário(a) de Educação, escolha o mais RECENTEMENTE empossado. Pistas: "nomeado", "empossado", "tomou posse", "decreto nº ...", "a partir de DD/MM/AAAA", data mais recente.
+- Snippets do Google geralmente refletem o(a) titular ATUAL — PREFIRA-OS ao Diário Oficial quando houver conflito, A MENOS QUE o trecho do diário seja claramente mais recente (data posterior).
+- Se houver indicação de exoneração/saída/troca, IGNORE o nome anterior e use o sucessor citado.
+- Preencha "dataReferencia" com a data/mês/ano da evidência usada (ex.: "2025-11", "abril/2025", "${anoAtual}"). Se não houver data, deixe null.
 
 URL: ${url}
 ${diarioBlock}
