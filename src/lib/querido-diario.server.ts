@@ -84,6 +84,8 @@ export async function buscarDiario(
   } catch (e) {
     const aborted = e instanceof DOMException && e.name === "AbortError";
     return { ok: false, reason: aborted ? `timeout ${timeoutMs}ms` : String(e) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
