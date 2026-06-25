@@ -261,7 +261,7 @@ Responda APENAS com JSON válido seguindo o schema. Sem comentários, sem markdo
 
 function hasUsefulContact(e: Extracted | null): boolean {
   if (!e) return false;
-  return (e.emails.length > 0 || e.telefones.length > 0) && e.confianca !== "baixa";
+  return e.emails.length > 0 || e.telefones.length > 0;
 }
 
 function fonteLabel(etapa: Hierarquia) {
