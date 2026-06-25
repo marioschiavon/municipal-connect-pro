@@ -189,7 +189,20 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
       {result && (
         <div className="mt-4 space-y-2.5 text-sm">
           {result.secretario && (
-            <Field icon={<User className="h-4 w-4" />} label="Secretário(a)" value={result.secretario} />
+            <Field
+              icon={<User className="h-4 w-4" />}
+              label="Secretário(a)"
+              value={
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <span>{result.secretario}</span>
+                  {result.nomeFonte === "diario" && (
+                    <span className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-700">
+                      via Diário Oficial
+                    </span>
+                  )}
+                </span>
+              }
+            />
           )}
           {result.cargo && (
             <Field icon={<Briefcase className="h-4 w-4" />} label="Cargo" value={result.cargo} />
