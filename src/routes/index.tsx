@@ -137,9 +137,14 @@ function Index() {
           <div>
             <div className="flex items-center gap-2.5">
               <h1 className="text-2xl font-bold tracking-tight">MunicipIA</h1>
-              <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+              <Link
+                to="/debug"
+                title="Abrir tela de debug"
+                aria-label="Abrir debug (secreto)"
+                className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700 transition hover:border-amber-300 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+              >
                 Alpha v0.1
-              </span>
+              </Link>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
               Coleta inteligente de contatos municipais
