@@ -308,14 +308,25 @@ function Index() {
             )}
 
             <div className="mt-5 flex flex-col gap-2">
-              <Button
-                onClick={startSearch}
-                disabled={selected.length === 0 || running}
-                className="w-full"
-              >
-                <Search className="mr-2 h-4 w-4" />
-                {running ? "Buscando..." : "Iniciar busca"}
-              </Button>
+              {running ? (
+                <Button
+                  onClick={cancelSearch}
+                  variant="destructive"
+                  className="w-full"
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  Cancelar busca
+                </Button>
+              ) : (
+                <Button
+                  onClick={startSearch}
+                  disabled={selected.length === 0}
+                  className="w-full"
+                >
+                  <Search className="mr-2 h-4 w-4" />
+                  Iniciar busca
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 onClick={clearAll}
@@ -326,6 +337,7 @@ function Index() {
                 Limpar tudo
               </Button>
             </div>
+
           </div>
 
           <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs leading-relaxed text-slate-600">
