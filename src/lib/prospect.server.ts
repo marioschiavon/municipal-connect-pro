@@ -103,6 +103,35 @@ function slugify(s: string): string {
     .replace(/[^a-z0-9]+/g, "");
 }
 
+// Timeout duro genérico — resolve null se estourar o limite.
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+  emit?: Emit,
+  etapa?: EtapaTag,
+): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutP = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      if (emit && etapa) emit("warn", etapa, `⏱ Timeout ${ms}ms em ${label} — seguindo`);
+      resolve(null);
+    }, ms);
+  });
+  try {
+    return (await Promise.race([promise, timeoutP])) as T | null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Municípios "grandes" — se anti-contam zerar e-mails, NÃO devolver parcial vazio
+// (forçar próximo fallback). Mantém comportamento atual para os demais.
+const LARGE_MUNI_SLUGS = new Set([
+  "curitiba","saopaulo","riodejaneiro","belohorizonte","salvador","fortaleza",
+  "manaus","recife","portoalegre","goiania","florianopolis","campinas","maringa",
+]);
+
 type SearchCandidate = {
   url: string;
   title: string;
