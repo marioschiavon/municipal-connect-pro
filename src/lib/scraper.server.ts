@@ -234,7 +234,36 @@ export function htmlToMarkdown(html: string, pageUrl?: string): string {
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const BAD_EMAIL_EXT = /\.(png|jpg|jpeg|gif|svg|webp|ico|css|js)$/i;
-const PHONE_RE = /\(?\b\d{2}\)?\s?9?\d{4}[-.\s]?\d{4}\b/g;
+
+// Captura número BR (com ou sem DDD entre parênteses). Validamos depois.
+const PHONE_RE = /\(?(\d{2})\)?[\s.-]?9?\d{4}[-.\s]?\d{4}/g;
+const PHONE_CONTEXT_RE = /(tel|fone|telefone|fax|whats\s?app|whats|zap|cel|celular|contato|telephone)/i;
+
+const VALID_DDDS = new Set<number>([
+  11,12,13,14,15,16,17,18,19,
+  21,22,24,27,28,
+  31,32,33,34,35,37,38,
+  41,42,43,44,45,46,47,48,49,
+  51,53,54,55,
+  61,62,63,64,65,66,67,68,69,
+  71,73,74,75,77,79,
+  81,82,83,84,85,86,87,88,89,
+  91,92,93,94,95,96,97,98,99,
+]);
+
+function formatBrPhone(raw: string): string | null {
+  const d = raw.replace(/\D+/g, "");
+  // Considera apenas formatos plausíveis: DDD + 8 (fixo) ou DDD + 9 (celular)
+  if (d.length !== 10 && d.length !== 11) return null;
+  const ddd = parseInt(d.slice(0, 2), 10);
+  if (!VALID_DDDS.has(ddd)) return null;
+  if (d.length === 11) {
+    // celular precisa começar com 9 no terceiro dígito
+    if (d[2] !== "9") return null;
+    return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  }
+  return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+}
 
 export function extractContactsRegex(text: string): { emails: string[]; telefones: string[] } {
   const emailsRaw = text.match(EMAIL_RE) ?? [];
@@ -242,8 +271,30 @@ export function extractContactsRegex(text: string): { emails: string[]; telefone
     new Set(emailsRaw.map((e) => e.trim()).filter((e) => !BAD_EMAIL_EXT.test(e))),
   ).slice(0, 25);
 
-  const phonesRaw = text.match(PHONE_RE) ?? [];
-  const telefones = Array.from(new Set(phonesRaw.map((p) => p.trim()))).slice(0, 25);
+  const phones: string[] = [];
+  const seen = new Set<string>();
+  PHONE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PHONE_RE.exec(text)) !== null) {
+    const match = m[0];
+    const idx = m.index;
+    // Janela de contexto: 60 chars antes/depois
+    const winStart = Math.max(0, idx - 60);
+    const winEnd = Math.min(text.length, idx + match.length + 60);
+    const window = text.slice(winStart, winEnd);
+    // Aceita se houver palavra-chave de telefone, OU se o próprio match tiver
+    // parênteses no DDD ou hífen no separador (ex.: "(44) 3221-1234").
+    const hasKeyword = PHONE_CONTEXT_RE.test(window);
+    const hasFormatHint = /\(\s*\d{2}\s*\)/.test(match) || /\d{4,5}-\d{4}/.test(match);
+    if (!hasKeyword && !hasFormatHint) continue;
+    const formatted = formatBrPhone(match);
+    if (!formatted) continue;
+    if (seen.has(formatted)) continue;
+    seen.add(formatted);
+    phones.push(formatted);
+    if (phones.length >= 25) break;
+  }
 
-  return { emails, telefones };
+  return { emails, telefones: phones };
 }
+
