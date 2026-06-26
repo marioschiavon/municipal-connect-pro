@@ -258,7 +258,7 @@ async function scrapeMarkdown(
     emit: (msg, data) => emit("info", etapa, msg, data),
   });
   if (native.ok) {
-    const md = htmlToMarkdown(native.html);
+    const md = htmlToMarkdown(native.html, native.finalUrl);
     if (md.replace(/\s+/g, " ").trim().length >= 200) {
       emit("success", etapa, `Página baixada direto (${(native.bytes / 1024).toFixed(1)} KB → ${md.length} chars markdown)`, { via: "native" });
       return md.slice(0, 18000);
