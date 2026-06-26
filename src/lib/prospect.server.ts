@@ -435,7 +435,7 @@ Responda APENAS com JSON válido seguindo o schema.`;
     // Anti-alucinação: descarta o que não aparece literalmente.
     const beforeE = out.emails.length;
     const beforeT = out.telefones.length;
-    out = filterPresent(out, conteudo);
+    out = filterPresent(out, conteudo, municipio, uf);
     if (beforeE !== out.emails.length || beforeT !== out.telefones.length) {
       emit("warn", etapa, `Descartei ${beforeE - out.emails.length} e-mail(s) e ${beforeT - out.telefones.length} tel sem correspondência literal no texto`);
     }
