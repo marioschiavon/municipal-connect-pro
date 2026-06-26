@@ -911,6 +911,52 @@ export async function prospectar(
   addToPool(all3);
   const ranked3 = preferGov(all3, (u) => /(educa|seduc|sme)/i.test(u));
   const top3 = ranked3.find((c) => /\.gov\.br|\.leg\.br/i.test(c.url)) ?? ranked3[0];
+
+  // Estágio 3.2 — scrape DEDICADO da página de contato do host de top3 (Correção 3).
+  // Captura e-mails como "seduc@municipio.gov.br" que aparecem só em /contato.
+  if (top3) {
+    const top3Host = shortHost(top3.url);
+    const contactQuery = `site:${top3Host} contato OR "fale conosco" OR "e-mail" secretaria educação`;
+    const contactCands = await gSearch(fc, contactQuery, emit, "educacao", { limit: 3, timeoutMs: 8000 });
+    addToPool(contactCands);
+    const contactRe = /(\/contato|\/fale[-_]?conosco|\/fale[-_]?com[-_]?nos|\/secretarias?\/educa|\/educacao\/contato|\/atendimento)/i;
+    const contactUrls = contactCands
+      .filter((c) => contactRe.test(c.url))
+      .map((c) => c.url)
+      .slice(0, 2);
+    for (const cu of contactUrls) {
+      emit("info", "educacao", `Estágio 3.2 — scrape página de contato ${shortHost(cu)}`);
+      const cmd = await gScrape(fc, cu, emit, "educacao", { hardTimeoutMs: 8000 });
+      if (!cmd) continue;
+      const cext = await extractWithAI(`### Página de Contato\n${cmd}`, cu, "educacao", municipio, uf, emit, {
+        nomeAlvo: nomeSecretario,
+        modo: "site",
+        topHost,
+      });
+      if (cext && hasUsefulContact(cext)) {
+        const hasGood = cext.emails.some((e) => !GENERIC_LOCAL.test(e)) || cext.telefones.length > 0;
+        if (hasGood) {
+          emit("success", "educacao", `✨ Contato via página de contato dedicada (${Date.now() - t0}ms)`);
+          return sendFinal({
+            status: "found",
+            hierarquia: "educacao",
+            secretario: cext.secretario ?? nomeSecretario,
+            cargo: cext.cargo ?? cargoSecretario,
+            emails: cext.emails,
+            telefones: cext.telefones,
+            fonte: "Página de contato da Secretaria",
+            fonteUrl: cu,
+            contexto: cext.contexto,
+            nomeFonte,
+            dataReferencia: cext.dataReferencia ?? dataReferenciaGlobal,
+            horarioAtendimento: cext.horarioAtendimento ?? null,
+          });
+        }
+        if (!melhorParcial) melhorParcial = { ext: cext, url: cu, via: "Página de contato da Secretaria" };
+      }
+    }
+  }
+
   if (top3) {
     emit("info", "educacao", `Estágio 3.3 — scrape de ${shortHost(top3.url)}`);
     const md = await gScrape(fc, top3.url, emit, "educacao", { hardTimeoutMs: 8000 });
