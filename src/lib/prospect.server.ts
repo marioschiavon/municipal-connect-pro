@@ -192,6 +192,33 @@ async function googleSearch(
   }
 }
 
+/** googleSearch com timeout duro — devolve [] se estourar. */
+async function gSearch(
+  fc: Firecrawl,
+  query: string,
+  emit: Emit,
+  etapa: EtapaTag,
+  opts: { limit?: number; tbs?: string; withScrape?: boolean; timeoutMs?: number } = {},
+): Promise<SearchCandidate[]> {
+  const { timeoutMs = 8000, ...rest } = opts;
+  const r = await withTimeout(googleSearch(fc, query, emit, etapa, rest), timeoutMs, `googleSearch("${query.slice(0, 60)}")`, emit, etapa);
+  return r ?? [];
+}
+
+/** scrapeMarkdown com timeout duro — devolve null se estourar. */
+async function gScrape(
+  fc: Firecrawl,
+  url: string,
+  emit: Emit,
+  etapa: EtapaTag,
+  opts: { timeoutMs?: number; hardTimeoutMs?: number } = {},
+): Promise<string | null> {
+  const hard = opts.hardTimeoutMs ?? 8000;
+  const inner: { timeoutMs?: number } = {};
+  if (opts.timeoutMs !== undefined) inner.timeoutMs = opts.timeoutMs;
+  return withTimeout(scrapeMarkdown(fc, url, emit, etapa, inner), hard, `scrapeMarkdown(${shortHost(url)})`, emit, etapa);
+}
+
 function snippetsBlock(cands: SearchCandidate[]): string {
   if (cands.length === 0) return "";
   const lines = cands.map(
