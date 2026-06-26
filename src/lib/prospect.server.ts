@@ -248,22 +248,16 @@ function filterPresent(extracted: Extracted, source: string, municipio?: string,
   const lower = source.toLowerCase();
   let emails = extracted.emails.filter((e) => lower.includes(e.toLowerCase().trim()));
 
-  // Anti-contaminação: descarta e-mails .gov.br de OUTRO município (domínio não
-  // contém slug do município nem a UF). Mantém pelo menos 1 e-mail se for o
-  // único disponível (com confiança baixa pelo chamador).
+  // Anti-contaminação: e-mail .gov.br tem que conter o SLUG do município-alvo
+  // no domínio. Se não contém, é de outro município mesmo dentro da UF correta
+  // (ex.: educacao@santoantoniodaplatina.pr.gov.br aparecendo em busca de Curitiba/PR).
+  // Mantém o suspeito só se for o único e-mail disponível (último recurso).
   if (municipio && uf && emails.length > 0) {
     const slug = slugify(municipio);
-    const ufLow = uf.toLowerCase();
     const isForeignGov = (e: string) => {
       const domain = (e.split("@")[1] ?? "").toLowerCase();
       if (!domain.endsWith(".gov.br")) return false;
-      if (domain.includes(slug)) return false;
-      // domínios típicos: x.{uf}.gov.br — exige que a UF do domínio bata
-      const ufMatch = domain.match(/\.([a-z]{2})\.gov\.br$/);
-      if (ufMatch && ufMatch[1] !== ufLow) return true;
-      // sem UF clara mas sem slug → suspeito
-      if (!ufMatch && !domain.includes(slug)) return true;
-      return false;
+      return !domain.includes(slug);
     };
     const cleaned = emails.filter((e) => !isForeignGov(e));
     if (cleaned.length > 0) emails = cleaned;
