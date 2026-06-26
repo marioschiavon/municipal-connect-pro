@@ -198,7 +198,7 @@ function Index() {
       }, 45000);
 
       try {
-        const result = await streamProspect(m.nome, m.uf, m.id, controller.signal, (evt) => {
+        const result = await streamProspect(m.nome, m.uf, m.id, useDiario, controller.signal, (evt) => {
           if (evt.kind === "progress") {
             logDebug(evt.level, scope, evt.message, evt.data);
             patchCard(key, (c) => {
