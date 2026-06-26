@@ -236,9 +236,32 @@ function digits(s: string): string {
   return s.replace(/\D+/g, "");
 }
 
-function filterPresent(extracted: Extracted, source: string): Extracted {
+function filterPresent(extracted: Extracted, source: string, municipio?: string, uf?: string): Extracted {
   const lower = source.toLowerCase();
-  const emails = extracted.emails.filter((e) => lower.includes(e.toLowerCase().trim()));
+  let emails = extracted.emails.filter((e) => lower.includes(e.toLowerCase().trim()));
+
+  // Anti-contaminação: descarta e-mails .gov.br de OUTRO município (domínio não
+  // contém slug do município nem a UF). Mantém pelo menos 1 e-mail se for o
+  // único disponível (com confiança baixa pelo chamador).
+  if (municipio && uf && emails.length > 0) {
+    const slug = slugify(municipio);
+    const ufLow = uf.toLowerCase();
+    const isForeignGov = (e: string) => {
+      const domain = (e.split("@")[1] ?? "").toLowerCase();
+      if (!domain.endsWith(".gov.br")) return false;
+      if (domain.includes(slug)) return false;
+      // domínios típicos: x.{uf}.gov.br — exige que a UF do domínio bata
+      const ufMatch = domain.match(/\.([a-z]{2})\.gov\.br$/);
+      if (ufMatch && ufMatch[1] !== ufLow) return true;
+      // sem UF clara mas sem slug → suspeito
+      if (!ufMatch && !domain.includes(slug)) return true;
+      return false;
+    };
+    const cleaned = emails.filter((e) => !isForeignGov(e));
+    if (cleaned.length > 0) emails = cleaned;
+    // se filtrou tudo, mantém o original (último recurso)
+  }
+
   const sourceDigits = digits(source);
   const telefones = extracted.telefones.filter((t) => {
     const d = digits(t);
@@ -258,7 +281,7 @@ async function scrapeMarkdown(
     emit: (msg, data) => emit("info", etapa, msg, data),
   });
   if (native.ok) {
-    const md = htmlToMarkdown(native.html);
+    const md = htmlToMarkdown(native.html, native.finalUrl);
     if (md.replace(/\s+/g, " ").trim().length >= 200) {
       emit("success", etapa, `Página baixada direto (${(native.bytes / 1024).toFixed(1)} KB → ${md.length} chars markdown)`, { via: "native" });
       return md.slice(0, 18000);
@@ -307,6 +330,9 @@ REGRAS:
 - Snippets do Google geralmente refletem o titular ATUAL — prefira-os ao Diário Oficial quando houver conflito, salvo se o trecho do diário for claramente mais recente.
 - "dataReferencia": data/mês/ano da evidência (ex.: "${anoAtual}-11", "abril/${anoAtual}"); senão null.
 - "confianca" = "alta" só quando o nome ATUAL está claramente identificado.
+- Se encontrar um nome em snippets de domínio ".gov.br" do próprio município, marque confiança como "alta" automaticamente, mesmo que o snippet seja curto.
+- Aceite o nome se ele aparecer ao menos 2 vezes nos snippets combinados, mesmo sem data explícita — nesse caso, confiança "media" ou "alta".
+- Antes de retornar confiança "baixa", releia mentalmente APENAS os snippets de ".gov.br" isolados e tente extrair novamente; só desista se ainda assim não houver evidência clara.
 
 URL: ${url}
 ${diarioBlock}
@@ -412,7 +438,7 @@ Responda APENAS com JSON válido seguindo o schema.`;
     // Anti-alucinação: descarta o que não aparece literalmente.
     const beforeE = out.emails.length;
     const beforeT = out.telefones.length;
-    out = filterPresent(out, conteudo);
+    out = filterPresent(out, conteudo, municipio, uf);
     if (beforeE !== out.emails.length || beforeT !== out.telefones.length) {
       emit("warn", etapa, `Descartei ${beforeE - out.emails.length} e-mail(s) e ${beforeT - out.telefones.length} tel sem correspondência literal no texto`);
     }
@@ -582,9 +608,20 @@ export async function prospectar(
   }
 
   if (snippetsNome) {
-    const nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
+    let nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
       diarioBlock,
     });
+    // Retry: se confiança baixa, tenta de novo com APENAS snippets de .gov.br
+    if (nomeRes && nomeRes.confianca === "baixa") {
+      const govOnly = rankedNome.filter((c) => /\.gov\.br/i.test(c.url));
+      if (govOnly.length > 0) {
+        const govSnippets = snippetsBlock(govOnly);
+        emit("info", "nome", `Confiança baixa — re-tentando só com ${govOnly.length} snippet(s) .gov.br`);
+        const retry = await extractNomeWithAI(govSnippets, govOnly[0].url, municipio, uf, emit, { diarioBlock });
+        if (retry?.secretario && retry.confianca !== "baixa") nomeRes = retry;
+        else if (retry?.secretario && !nomeRes.secretario) nomeRes = retry;
+      }
+    }
     if (nomeRes?.secretario) {
       if (nomeSecretario && nomeRes.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()) {
         emit("warn", "nome", `Conflito: diário=${nomeSecretario} / snippet=${nomeRes.secretario} — adotando snippet (mais atual)`);
