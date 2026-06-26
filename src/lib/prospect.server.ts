@@ -509,6 +509,17 @@ export async function prospectar(
   const slug = slugify(municipio);
   const ufLow = uf.toLowerCase();
 
+  // Pool global de snippets — reaproveitado entre estágios.
+  const snippetPool: SearchCandidate[] = [];
+  const seenUrls = new Set<string>();
+  const addToPool = (cands: SearchCandidate[]) => {
+    for (const c of cands) {
+      if (!c?.url || seenUrls.has(c.url)) continue;
+      seenUrls.add(c.url);
+      snippetPool.push(c);
+    }
+  };
+
   // Diário Oficial em background.
   let diarioExcerpts: DiarioExcerpt[] = [];
   let diarioBlock = "";
@@ -539,13 +550,19 @@ export async function prospectar(
   // ESTÁGIO 1 — NOME ATUAL (apenas nome, sem contato)
   // ============================================================
   emit("info", "nome", "Estágio 1 — identificar NOME atual do(a) Secretário(a) de Educação");
-  const queryNome = `secretário OR secretária de educação ${municipio} ${uf} ${anoAtual} atual`;
-  const candsNome = await googleSearch(fc, queryNome, emit, "nome", { limit: 10, tbs: "qdr:y" });
+  const queryNomeA = `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário atual`;
+  const queryNomeB = `secretário OR secretária de educação ${municipio} ${uf} ${anoAtual} atual`;
+  const [candsNomeA, candsNomeB] = await Promise.all([
+    googleSearch(fc, queryNomeA, emit, "nome", { limit: 8, tbs: "qdr:y" }),
+    googleSearch(fc, queryNomeB, emit, "nome", { limit: 6, tbs: "qdr:y" }),
+  ]);
+  const candsNome = dedupeByUrl([...candsNomeA, ...candsNomeB]);
+  addToPool(candsNome);
   const rankedNome = preferGov(candsNome, (u) => /(educa|secretari)/i.test(u));
   const snippetsNome = snippetsBlock(rankedNome);
   const topNome = rankedNome[0] ?? null;
+  const topHost = topNome ? shortHost(topNome.url) : undefined;
 
-  // Espera só 800ms pelo diário para enriquecer o prompt; senão segue.
   if (useDiario) {
     await Promise.race([diarioPromise, new Promise<void>((r) => setTimeout(r, 800))]);
   }
@@ -586,6 +603,51 @@ export async function prospectar(
   }
 
   // ============================================================
+  // ESTÁGIO 1.5 — Scrape oportunista do topo (se for página da Secretaria)
+  // ============================================================
+  const looksLikeSeducPage = (c?: SearchCandidate | null) => {
+    if (!c) return false;
+    const text = `${c.url} ${c.title ?? ""} ${c.description ?? ""}`.toLowerCase();
+    return (
+      /\.gov\.br|\.leg\.br/.test(c.url) &&
+      /(secretaria|secretári|seduc|sme|smed|educa)/.test(text)
+    );
+  };
+  if (looksLikeSeducPage(topNome)) {
+    emit("info", "educacao", `Estágio 1.5 — scrape oportunista de ${topHost}`);
+    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao");
+    if (md) {
+      const combined = `### Site\n${md}\n\n### Snippets\n${snippetsBlock(rankedNome)}`;
+      const ext = await extractWithAI(combined, topNome!.url, "educacao", municipio, uf, emit, {
+        nomeAlvo: nomeSecretario,
+        diarioBlock,
+        modo: "site",
+        topHost,
+      });
+      if (ext && hasUsefulContact(ext)) {
+        const hasGood = ext.emails.some((e) => !GENERIC_LOCAL.test(e)) || ext.telefones.length > 0;
+        if (hasGood) {
+          emit("success", "educacao", `✨ Contato via página oficial topo (${Date.now() - t0}ms)`);
+          return sendFinal({
+            status: "found",
+            hierarquia: "educacao",
+            secretario: ext.secretario ?? nomeSecretario,
+            cargo: ext.cargo ?? cargoSecretario,
+            emails: ext.emails,
+            telefones: ext.telefones,
+            fonte: "Site oficial da Secretaria de Educação",
+            fonteUrl: topNome!.url,
+            contexto: ext.contexto,
+            nomeFonte: nomeFonte ?? (ext.secretario ? "snippet" : null),
+            dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+            horarioAtendimento: ext.horarioAtendimento ?? null,
+          });
+        }
+      }
+    }
+  }
+
+  // ============================================================
   // ESTÁGIO 2 — CONTATO VINCULADO AO NOME (cascata interna)
   // ============================================================
   let melhorParcial: { ext: Extracted; url: string | null; via: string } | null = null;
@@ -597,15 +659,16 @@ export async function prospectar(
     hierarquia: Hierarquia,
   ): Promise<ProspectResult | null> => {
     const cands = await googleSearch(fc, query, emit, etapaTag, { limit: 8, tbs: "qdr:y" });
+    addToPool(cands);
     if (cands.length === 0) return null;
     const ranked = preferGov(cands, (u) => /(educa|seduc|sme)/i.test(u));
     const snippets = snippetsBlock(ranked);
     const ext = await extractWithAI(snippets, ranked[0]?.url ?? "(snippets)", hierarquia, municipio, uf, emit, {
       nomeAlvo: nomeSecretario,
       modo: "snippets",
+      topHost,
     });
     if (ext && hasUsefulContact(ext)) {
-      // se já temos e-mail bom, podemos fechar
       const hasGoodEmail = ext.emails.some((e) => !GENERIC_LOCAL.test(e));
       if (hasGoodEmail || ext.telefones.length > 0) {
         emit("success", etapaTag, `✨ Contato encontrado via ${via} (${Date.now() - t0}ms)`);
@@ -621,9 +684,9 @@ export async function prospectar(
           contexto: ext.contexto ?? `Snippet (${via}).`,
           nomeFonte: nomeFonte ?? (nomeSecretario ? "snippet" : null),
           dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+          horarioAtendimento: ext.horarioAtendimento ?? null,
         };
       }
-      // segura como parcial
       if (!melhorParcial) melhorParcial = { ext, url: ranked[0]?.url ?? null, via };
     }
     return null;
@@ -631,7 +694,6 @@ export async function prospectar(
 
   if (nomeSecretario) {
     emit("info", "contato-secretario", `Estágio 2 — contato vinculado a "${nomeSecretario}"`);
-    // 2.1
     const r2a = await tentarContato(
       `"${nomeSecretario}" "secretaria de educação" ${municipio} ${uf}`,
       `Snippet vinculado ao nome (${nomeSecretario})`,
@@ -640,7 +702,6 @@ export async function prospectar(
     );
     if (r2a) return sendFinal(r2a);
 
-    // 2.2
     const r2b = await tentarContato(
       `"${nomeSecretario}" ${municipio} ${uf} (email OR e-mail OR telefone OR contato)`,
       `Snippet "${nomeSecretario}" + contato`,
@@ -649,10 +710,10 @@ export async function prospectar(
     );
     if (r2b) return sendFinal(r2b);
 
-    // 2.3 — scrape do melhor .gov.br das duas buscas
     const all = dedupeByUrl([
       ...(await googleSearch(fc, `"${nomeSecretario}" secretaria educação ${municipio} ${uf}`, emit, "contato-secretario", { limit: 5, tbs: "qdr:y" })),
     ]);
+    addToPool(all);
     const rankedAll = preferGov(all, (u) => /(educa|seduc|sme)/i.test(u));
     const topGov = rankedAll.find((c) => /\.gov\.br/i.test(c.url));
     if (topGov) {
@@ -663,6 +724,7 @@ export async function prospectar(
         const ext = await extractWithAI(combined, topGov.url, "educacao", municipio, uf, emit, {
           nomeAlvo: nomeSecretario,
           modo: "site",
+          topHost,
         });
         if (ext && hasUsefulContact(ext)) {
           const hasGood = ext.emails.some((e) => !GENERIC_LOCAL.test(e)) || ext.telefones.length > 0;
@@ -680,6 +742,7 @@ export async function prospectar(
               contexto: ext.contexto,
               nomeFonte,
               dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+              horarioAtendimento: ext.horarioAtendimento ?? null,
             });
           }
           if (!melhorParcial) melhorParcial = { ext, url: topGov.url, via: "Site oficial (busca por nome)" };
@@ -693,7 +756,6 @@ export async function prospectar(
   // ============================================================
   emit("info", "educacao", "Estágio 3 — contato institucional da Secretaria de Educação");
 
-  // 3.1
   const r3a = await tentarContato(
     `"secretaria municipal de educação" ${municipio} ${uf} (email OR contato OR telefone)`,
     "Snippet institucional Educação",
@@ -702,7 +764,6 @@ export async function prospectar(
   );
   if (r3a) return sendFinal(r3a);
 
-  // 3.2
   const r3b = await tentarContato(
     `secretaria de educação ${municipio} ${uf} site:gov.br`,
     "Snippet site:gov.br Educação",
@@ -711,28 +772,20 @@ export async function prospectar(
   );
   if (r3b) return sendFinal(r3b);
 
-  // 3.3 — Câmara Municipal (frequentemente lista secretários e contatos)
-  const r3c = await tentarContato(
-    `"secretaria de educação" ${municipio} site:${slug}.${ufLow}.leg.br OR site:camara${slug}.${ufLow}.leg.br`,
-    "Snippet Câmara Municipal",
-    "educacao",
-    "educacao",
-  );
-  if (r3c) return sendFinal(r3c);
-
-  // 3.4 — scrape do melhor .gov.br/.leg.br dos resultados acima
   const all3 = dedupeByUrl([
     ...(await googleSearch(fc, `secretaria municipal de educação ${municipio} ${uf} contato`, emit, "educacao", { limit: 6 })),
   ]);
+  addToPool(all3);
   const ranked3 = preferGov(all3, (u) => /(educa|seduc|sme)/i.test(u));
   const top3 = ranked3.find((c) => /\.gov\.br|\.leg\.br/i.test(c.url)) ?? ranked3[0];
   if (top3) {
-    emit("info", "educacao", `Estágio 3.4 — scrape de ${shortHost(top3.url)}`);
+    emit("info", "educacao", `Estágio 3.3 — scrape de ${shortHost(top3.url)}`);
     const md = await scrapeMarkdown(fc, top3.url, emit, "educacao");
     if (md) {
       const ext = await extractWithAI(`### Site\n${md}`, top3.url, "educacao", municipio, uf, emit, {
         nomeAlvo: nomeSecretario,
         modo: "site",
+        topHost,
       });
       if (ext && hasUsefulContact(ext)) {
         const hasGood = ext.emails.some((e) => !GENERIC_LOCAL.test(e)) || ext.telefones.length > 0;
@@ -750,6 +803,7 @@ export async function prospectar(
             contexto: ext.contexto,
             nomeFonte,
             dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+            horarioAtendimento: ext.horarioAtendimento ?? null,
           });
         }
         if (!melhorParcial) melhorParcial = { ext, url: top3.url, via: fonteLabel("educacao") };
@@ -757,7 +811,7 @@ export async function prospectar(
     }
   }
 
-  // Se temos um parcial decente (mesmo só com genéricos), devolve antes do fallback geral.
+  // Devolve parcial bom de Educação se houver
   if (melhorParcial) {
     const { ext, url, via } = melhorParcial as { ext: Extracted; url: string | null; via: string };
     emit("warn", "educacao", `Sem e-mail específico de Educação — devolvendo parcial (${via})`);
@@ -773,24 +827,26 @@ export async function prospectar(
       contexto: ext.contexto,
       nomeFonte,
       dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+      horarioAtendimento: ext.horarioAtendimento ?? null,
     });
   }
 
   // ============================================================
-  // ESTÁGIO 4 — Fallbacks institucionais
+  // ESTÁGIO 4 — Fallbacks institucionais (Câmara → Geral → Gabinete)
   // ============================================================
-  async function runFallback(etapa: Hierarquia, query: string): Promise<ProspectResult | null> {
-    emit("info", etapa, `Fallback ${etapa} — snippet-only`);
+  async function runFallback(etapa: Hierarquia, query: string, label: string): Promise<ProspectResult | null> {
+    emit("info", etapa, `${label} — snippet-only`);
     const cands = await googleSearch(fc, query, emit, etapa, { limit: 8 });
+    addToPool(cands);
     const ranked = preferGov(cands);
     if (ranked.length === 0) return null;
     const snippets = snippetsBlock(ranked);
-    let ext = await extractWithAI(snippets, ranked[0].url, etapa, municipio, uf, emit, { modo: "snippets" });
+    let ext = await extractWithAI(snippets, ranked[0].url, etapa, municipio, uf, emit, { modo: "snippets", topHost });
     if (!ext || !hasUsefulContact(ext)) {
       const md = await scrapeMarkdown(fc, ranked[0].url, emit, etapa);
       if (md) {
         const combined = [snippets, `### Site\n${md}`].filter(Boolean).join("\n\n");
-        ext = await extractWithAI(combined, ranked[0].url, etapa, municipio, uf, emit, { modo: "site" });
+        ext = await extractWithAI(combined, ranked[0].url, etapa, municipio, uf, emit, { modo: "site", topHost });
       }
     }
     if (!ext || !hasUsefulContact(ext)) return null;
@@ -806,16 +862,36 @@ export async function prospectar(
       contexto: ext.contexto,
       nomeFonte: nomeSecretario ? nomeFonte : null,
       dataReferencia: ext.dataReferencia ?? dataReferenciaGlobal,
+      horarioAtendimento: ext.horarioAtendimento ?? null,
     };
   }
 
-  emit("warn", "fallback", "Estágio 4.1 — contato geral da prefeitura");
-  const r2 = await runFallback("geral", `prefeitura ${municipio} ${uf} ouvidoria contato e-mail telefone`);
-  if (r2) return sendFinal(r2);
+  // 4.1 — Câmara Municipal (geralmente tem "Fale Conosco" com e-mail institucional)
+  emit("warn", "fallback", "Estágio 4.1 — Câmara Municipal (contato/fale conosco)");
+  const r4a = await runFallback(
+    "camara",
+    `câmara municipal ${municipio} ${uf} contato fale conosco (site:${slug}.${ufLow}.leg.br OR site:camara${slug}.${ufLow}.leg.br OR site:.leg.br)`,
+    "Câmara Municipal",
+  );
+  if (r4a) return sendFinal(r4a);
 
-  emit("warn", "fallback", "Estágio 4.2 — gabinete do prefeito");
-  const r3 = await runFallback("gabinete", `gabinete do prefeito ${municipio} ${uf} contato e-mail telefone`);
-  if (r3) return sendFinal(r3);
+  // 4.2 — Contato geral da Prefeitura
+  emit("warn", "fallback", "Estágio 4.2 — contato geral da Prefeitura");
+  const r4b = await runFallback(
+    "geral",
+    `prefeitura ${municipio} ${uf} ouvidoria contato e-mail telefone`,
+    "Contato geral da Prefeitura",
+  );
+  if (r4b) return sendFinal(r4b);
+
+  // 4.3 — Gabinete do Prefeito
+  emit("warn", "fallback", "Estágio 4.3 — Gabinete do Prefeito");
+  const r4c = await runFallback(
+    "gabinete",
+    `gabinete do prefeito ${municipio} ${uf} contato e-mail telefone`,
+    "Gabinete do Prefeito",
+  );
+  if (r4c) return sendFinal(r4c);
 
   if (nomeSecretario) {
     emit("warn", "final", "Só consegui o nome — devolvendo parcial");
@@ -831,6 +907,7 @@ export async function prospectar(
       contexto: "Nome identificado, mas não localizamos e-mail/telefone associados.",
       nomeFonte,
       dataReferencia: dataReferenciaGlobal,
+      horarioAtendimento: null,
     });
   }
 
@@ -845,5 +922,7 @@ export async function prospectar(
     fonte: null,
     fonteUrl: null,
     contexto: "Nenhum contato encontrado.",
+    horarioAtendimento: null,
   });
 }
+
