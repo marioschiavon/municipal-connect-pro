@@ -692,29 +692,55 @@ export async function prospectar(
     });
 
     // ---- Promoção determinística da confiança (não depende da IA) ----
-    // Conta ocorrências literais do nome nos snippets do Google. Se aparecer em
-    // .gov.br do próprio município → "alta". Se aparecer em ≥2 snippets → "media".
-    // Só descarta se confiança ficar "baixa" E o nome não aparecer em nenhum snippet.
+    // Normaliza texto removendo acentos, lowercase, colapsa espaços.
+    const norm = (s: string) =>
+      s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+    // Preposições descartáveis na comparação por tokens.
+    const STOP = new Set(["de","da","do","dos","das","e","a","o"]);
+    // Verifica se o nome aparece num blob de texto, com tolerância a acentos e tokens parciais.
+    const nameAppearsIn = (nome: string, blob: string): boolean => {
+      const nNome = norm(nome);
+      const nBlob = norm(blob);
+      // Match direto (nome completo normalizado).
+      if (nBlob.includes(nNome)) return true;
+      // Match por tokens: pelo menos 2 tokens significativos (len >= 4, fora das preposições) presentes no blob.
+      const tokens = nNome.split(" ").filter(t => t.length >= 4 && !STOP.has(t));
+      if (tokens.length >= 2) {
+        const hits = tokens.filter(t => nBlob.includes(t));
+        if (hits.length >= 2) return true;
+      }
+      return false;
+    };
     let confianca: "alta" | "media" | "baixa" = nomeRes?.confianca ?? "baixa";
     let appearsCount = 0;
     let appearsInOwnGov = false;
     if (nomeRes?.secretario) {
-      const nomeLow = nomeRes.secretario.toLowerCase().trim();
       for (const c of rankedNome) {
-        const blob = `${c.title ?? ""} ${c.description ?? ""}`.toLowerCase();
-        if (!blob.includes(nomeLow)) continue;
+        const blob = `${c.title ?? ""} ${c.description ?? ""} ${c.url}`;
+        if (!nameAppearsIn(nomeRes.secretario, blob)) continue;
         appearsCount += 1;
         const host = shortHost(c.url).toLowerCase();
         if (/\.gov\.br$/.test(host) && host.includes(slug)) appearsInOwnGov = true;
       }
       if (appearsInOwnGov) confianca = "alta";
-      else if (appearsCount >= 2 && confianca === "baixa") confianca = "media";
+      else if (appearsCount >= 1 && confianca === "baixa") confianca = "media";
+      else if (appearsCount >= 2) confianca = "media";
       emit("info", "nome", `Confiança ajustada: IA=${nomeRes.confianca} → ${confianca} (aparições=${appearsCount}, govPróprio=${appearsInOwnGov})`);
+      // Warn detalhado se ainda não bateu — facilita debug futuro.
+      if (appearsCount === 0) {
+        const sample = rankedNome.slice(0, 3).map(c => norm(`${c.title} ${c.description}`));
+        emit("warn", "nome", `Nome "${norm(nomeRes.secretario)}" não bateu em nenhum snippet — blobs normalizados:`, { sample });
+      }
     }
-
-    const aceitaNome = !!nomeRes?.secretario && (confianca !== "baixa" || appearsCount >= 1);
+    // Aceita o nome se: existe E (confiança não-baixa OU aparece em pelo menos 1 snippet OU a própria IA retornou media/alta).
+    const aceitaNome =
+      !!nomeRes?.secretario &&
+      (confianca !== "baixa" ||
+        appearsCount >= 1 ||
+        nomeRes.confianca === "media" ||
+        nomeRes.confianca === "alta");
     if (nomeRes?.secretario && !aceitaNome) {
-      emit("warn", "nome", `Descartando nome "${nomeRes.secretario}" — não aparece em nenhum snippet e confiança baixa`);
+      emit("warn", "nome", `Descartando nome "${nomeRes.secretario}" — confiança baixa e sem aparições nos snippets`);
     }
     if (aceitaNome && nomeRes?.secretario) {
       if (nomeSecretario && nomeRes.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()) {
