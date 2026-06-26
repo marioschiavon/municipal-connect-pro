@@ -103,6 +103,35 @@ function slugify(s: string): string {
     .replace(/[^a-z0-9]+/g, "");
 }
 
+// Timeout duro genérico — resolve null se estourar o limite.
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+  emit?: Emit,
+  etapa?: EtapaTag,
+): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutP = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      if (emit && etapa) emit("warn", etapa, `⏱ Timeout ${ms}ms em ${label} — seguindo`);
+      resolve(null);
+    }, ms);
+  });
+  try {
+    return (await Promise.race([promise, timeoutP])) as T | null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Municípios "grandes" — se anti-contam zerar e-mails, NÃO devolver parcial vazio
+// (forçar próximo fallback). Mantém comportamento atual para os demais.
+const LARGE_MUNI_SLUGS = new Set([
+  "curitiba","saopaulo","riodejaneiro","belohorizonte","salvador","fortaleza",
+  "manaus","recife","portoalegre","goiania","florianopolis","campinas","maringa",
+]);
+
 type SearchCandidate = {
   url: string;
   title: string;
@@ -130,9 +159,18 @@ async function googleSearch(
     if (tbs) baseOpts.tbs = tbs;
     if (withScrape) baseOpts.scrapeOptions = { formats: ["markdown"], onlyMainContent: true };
     const res = await fc.search(query, baseOpts as Parameters<Firecrawl["search"]>[1]);
-    const web =
-      (res as { web?: Array<{ url: string; title?: string; description?: string; markdown?: string }> })
-        .web ?? [];
+    const resObj = res as { web?: Array<{ url: string; title?: string; description?: string; markdown?: string }> };
+    const hasWebProp = Object.prototype.hasOwnProperty.call(resObj, "web");
+    const web = resObj.web ?? [];
+    if (!hasWebProp || web.length === 0) {
+      let rawDump = "";
+      try {
+        rawDump = JSON.stringify(res).slice(0, 500);
+      } catch {
+        rawDump = String(res).slice(0, 500);
+      }
+      emit("warn", etapa, `Firecrawl search retornou vazio (hasWeb=${hasWebProp}, len=${web.length}) — payload bruto:`, { query, rawPreview: rawDump });
+    }
     const cands: SearchCandidate[] = web
       .filter((r) => r.url && !isBlockedHost(r.url))
       .map((r) => ({
@@ -152,6 +190,33 @@ async function googleSearch(
     emit("error", etapa, "Erro na busca do Firecrawl", String(e));
     return [];
   }
+}
+
+/** googleSearch com timeout duro — devolve [] se estourar. */
+async function gSearch(
+  fc: Firecrawl,
+  query: string,
+  emit: Emit,
+  etapa: EtapaTag,
+  opts: { limit?: number; tbs?: string; withScrape?: boolean; timeoutMs?: number } = {},
+): Promise<SearchCandidate[]> {
+  const { timeoutMs = 8000, ...rest } = opts;
+  const r = await withTimeout(googleSearch(fc, query, emit, etapa, rest), timeoutMs, `googleSearch("${query.slice(0, 60)}")`, emit, etapa);
+  return r ?? [];
+}
+
+/** scrapeMarkdown com timeout duro — devolve null se estourar. */
+async function gScrape(
+  fc: Firecrawl,
+  url: string,
+  emit: Emit,
+  etapa: EtapaTag,
+  opts: { timeoutMs?: number; hardTimeoutMs?: number } = {},
+): Promise<string | null> {
+  const hard = opts.hardTimeoutMs ?? 8000;
+  const inner: { timeoutMs?: number } = {};
+  if (opts.timeoutMs !== undefined) inner.timeoutMs = opts.timeoutMs;
+  return withTimeout(scrapeMarkdown(fc, url, emit, etapa, inner), hard, `scrapeMarkdown(${shortHost(url)})`, emit, etapa);
 }
 
 function snippetsBlock(cands: SearchCandidate[]): string {
@@ -584,11 +649,21 @@ export async function prospectar(
   emit("info", "nome", "Estágio 1 — identificar NOME atual do(a) Secretário(a) de Educação");
   const queryNomeA = `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário atual`;
   const queryNomeB = `secretário OR secretária de educação ${municipio} ${uf} ${anoAtual} atual`;
-  const [candsNomeA, candsNomeB] = await Promise.all([
-    googleSearch(fc, queryNomeA, emit, "nome", { limit: 8, tbs: "qdr:y" }),
-    googleSearch(fc, queryNomeB, emit, "nome", { limit: 6, tbs: "qdr:y" }),
+  const queryNomeC = `site:${slug}.${ufLow}.gov.br secretaria educação secretário`;
+  const [candsNomeA, candsNomeB, candsNomeC] = await Promise.all([
+    gSearch(fc, queryNomeA, emit, "nome", { limit: 8, tbs: "qdr:y", timeoutMs: 8000 }),
+    gSearch(fc, queryNomeB, emit, "nome", { limit: 6, tbs: "qdr:y", timeoutMs: 8000 }),
+    gSearch(fc, queryNomeC, emit, "nome", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 }),
   ]);
-  const candsNome = dedupeByUrl([...candsNomeA, ...candsNomeB]);
+  // Fallback de domínio: se o domínio padrão {slug}.{uf}.gov.br não retornou nada,
+  // tenta {uf}.gov.br com o nome do município.
+  let candsNomeCfb: SearchCandidate[] = [];
+  if (candsNomeC.length === 0) {
+    const queryNomeCfb = `site:${ufLow}.gov.br "${municipio}" secretaria educação secretário`;
+    candsNomeCfb = await gSearch(fc, queryNomeCfb, emit, "nome", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 });
+  }
+  // Priorizar resultados do domínio oficial do município (queryNomeC/fb) ANTES de A/B.
+  const candsNome = dedupeByUrl([...candsNomeC, ...candsNomeCfb, ...candsNomeA, ...candsNomeB]);
   addToPool(candsNome);
   const rankedNome = preferGov(candsNome, (u) => /(educa|secretari)/i.test(u));
   const snippetsNome = snippetsBlock(rankedNome);
@@ -673,7 +748,7 @@ export async function prospectar(
   };
   if (looksLikeSeducPage(topNome)) {
     emit("info", "educacao", `Estágio 1.5 — scrape oportunista de ${topHost}`);
-    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000 });
+    const md = await gScrape(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000, hardTimeoutMs: 4000 });
     if (md) {
       const combined = `### Site\n${md}\n\n### Snippets\n${snippetsBlock(rankedNome)}`;
       const ext = await extractWithAI(combined, topNome!.url, "educacao", municipio, uf, emit, {
@@ -716,7 +791,7 @@ export async function prospectar(
     etapaTag: EtapaTag,
     hierarquia: Hierarquia,
   ): Promise<ProspectResult | null> => {
-    const cands = await googleSearch(fc, query, emit, etapaTag, { limit: 8, tbs: "qdr:y" });
+    const cands = await gSearch(fc, query, emit, etapaTag, { limit: 8, tbs: "qdr:y", timeoutMs: 8000 });
     addToPool(cands);
     if (cands.length === 0) return null;
     const ranked = preferGov(cands, (u) => /(educa|seduc|sme)/i.test(u));
@@ -769,14 +844,14 @@ export async function prospectar(
     if (r2b) return sendFinal(r2b);
 
     const all = dedupeByUrl([
-      ...(await googleSearch(fc, `"${nomeSecretario}" secretaria educação ${municipio} ${uf}`, emit, "contato-secretario", { limit: 5, tbs: "qdr:y" })),
+      ...(await gSearch(fc, `"${nomeSecretario}" secretaria educação ${municipio} ${uf}`, emit, "contato-secretario", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 })),
     ]);
     addToPool(all);
     const rankedAll = preferGov(all, (u) => /(educa|seduc|sme)/i.test(u));
     const topGov = rankedAll.find((c) => /\.gov\.br/i.test(c.url));
     if (topGov) {
       emit("info", "contato-secretario", `Estágio 2.3 — scrape do site oficial (${shortHost(topGov.url)})`);
-      const md = await scrapeMarkdown(fc, topGov.url, emit, "contato-secretario");
+      const md = await gScrape(fc, topGov.url, emit, "contato-secretario", { hardTimeoutMs: 8000 });
       if (md) {
         const combined = `### Site\n${md}`;
         const ext = await extractWithAI(combined, topGov.url, "educacao", municipio, uf, emit, {
@@ -831,14 +906,60 @@ export async function prospectar(
   if (r3b) return sendFinal(r3b);
 
   const all3 = dedupeByUrl([
-    ...(await googleSearch(fc, `secretaria municipal de educação ${municipio} ${uf} contato`, emit, "educacao", { limit: 6 })),
+    ...(await gSearch(fc, `secretaria municipal de educação ${municipio} ${uf} contato`, emit, "educacao", { limit: 6, timeoutMs: 8000 })),
   ]);
   addToPool(all3);
   const ranked3 = preferGov(all3, (u) => /(educa|seduc|sme)/i.test(u));
   const top3 = ranked3.find((c) => /\.gov\.br|\.leg\.br/i.test(c.url)) ?? ranked3[0];
+
+  // Estágio 3.2 — scrape DEDICADO da página de contato do host de top3 (Correção 3).
+  // Captura e-mails como "seduc@municipio.gov.br" que aparecem só em /contato.
+  if (top3) {
+    const top3Host = shortHost(top3.url);
+    const contactQuery = `site:${top3Host} contato OR "fale conosco" OR "e-mail" secretaria educação`;
+    const contactCands = await gSearch(fc, contactQuery, emit, "educacao", { limit: 3, timeoutMs: 8000 });
+    addToPool(contactCands);
+    const contactRe = /(\/contato|\/fale[-_]?conosco|\/fale[-_]?com[-_]?nos|\/secretarias?\/educa|\/educacao\/contato|\/atendimento)/i;
+    const contactUrls = contactCands
+      .filter((c) => contactRe.test(c.url))
+      .map((c) => c.url)
+      .slice(0, 2);
+    for (const cu of contactUrls) {
+      emit("info", "educacao", `Estágio 3.2 — scrape página de contato ${shortHost(cu)}`);
+      const cmd = await gScrape(fc, cu, emit, "educacao", { hardTimeoutMs: 8000 });
+      if (!cmd) continue;
+      const cext = await extractWithAI(`### Página de Contato\n${cmd}`, cu, "educacao", municipio, uf, emit, {
+        nomeAlvo: nomeSecretario,
+        modo: "site",
+        topHost,
+      });
+      if (cext && hasUsefulContact(cext)) {
+        const hasGood = cext.emails.some((e) => !GENERIC_LOCAL.test(e)) || cext.telefones.length > 0;
+        if (hasGood) {
+          emit("success", "educacao", `✨ Contato via página de contato dedicada (${Date.now() - t0}ms)`);
+          return sendFinal({
+            status: "found",
+            hierarquia: "educacao",
+            secretario: cext.secretario ?? nomeSecretario,
+            cargo: cext.cargo ?? cargoSecretario,
+            emails: cext.emails,
+            telefones: cext.telefones,
+            fonte: "Página de contato da Secretaria",
+            fonteUrl: cu,
+            contexto: cext.contexto,
+            nomeFonte,
+            dataReferencia: cext.dataReferencia ?? dataReferenciaGlobal,
+            horarioAtendimento: cext.horarioAtendimento ?? null,
+          });
+        }
+        if (!melhorParcial) melhorParcial = { ext: cext, url: cu, via: "Página de contato da Secretaria" };
+      }
+    }
+  }
+
   if (top3) {
     emit("info", "educacao", `Estágio 3.3 — scrape de ${shortHost(top3.url)}`);
-    const md = await scrapeMarkdown(fc, top3.url, emit, "educacao");
+    const md = await gScrape(fc, top3.url, emit, "educacao", { hardTimeoutMs: 8000 });
     if (md) {
       const ext = await extractWithAI(`### Site\n${md}`, top3.url, "educacao", municipio, uf, emit, {
         nomeAlvo: nomeSecretario,
@@ -894,20 +1015,26 @@ export async function prospectar(
   // ============================================================
   async function runFallback(etapa: Hierarquia, query: string, label: string): Promise<ProspectResult | null> {
     emit("info", etapa, `${label} — snippet-only`);
-    const cands = await googleSearch(fc, query, emit, etapa, { limit: 8 });
+    const cands = await gSearch(fc, query, emit, etapa, { limit: 8, timeoutMs: 5000 });
     addToPool(cands);
     const ranked = preferGov(cands);
     if (ranked.length === 0) return null;
     const snippets = snippetsBlock(ranked);
     let ext = await extractWithAI(snippets, ranked[0].url, etapa, municipio, uf, emit, { modo: "snippets", topHost });
     if (!ext || !hasUsefulContact(ext)) {
-      const md = await scrapeMarkdown(fc, ranked[0].url, emit, etapa);
+      const md = await gScrape(fc, ranked[0].url, emit, etapa, { hardTimeoutMs: 5000 });
       if (md) {
         const combined = [snippets, `### Site\n${md}`].filter(Boolean).join("\n\n");
         ext = await extractWithAI(combined, ranked[0].url, etapa, municipio, uf, emit, { modo: "site", topHost });
       }
     }
     if (!ext || !hasUsefulContact(ext)) return null;
+    // Correção 4: para cidades grandes, NÃO devolver parcial com emails vazios
+    // (anti-contam zerou tudo). Devolver null força o próximo fallback a tentar.
+    if (ext.emails.length === 0 && LARGE_MUNI_SLUGS.has(slug)) {
+      emit("warn", etapa, `Cidade grande (${slug}) + emails=[] após anti-contam — recusando parcial vazio, próximo fallback`);
+      return null;
+    }
     return {
       status: "partial",
       hierarquia: etapa,
