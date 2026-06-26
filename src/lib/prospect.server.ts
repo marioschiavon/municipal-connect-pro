@@ -649,11 +649,21 @@ export async function prospectar(
   emit("info", "nome", "Estágio 1 — identificar NOME atual do(a) Secretário(a) de Educação");
   const queryNomeA = `prefeitura municipal ${municipio} ${uf} secretaria de educação secretário atual`;
   const queryNomeB = `secretário OR secretária de educação ${municipio} ${uf} ${anoAtual} atual`;
-  const [candsNomeA, candsNomeB] = await Promise.all([
-    googleSearch(fc, queryNomeA, emit, "nome", { limit: 8, tbs: "qdr:y" }),
-    googleSearch(fc, queryNomeB, emit, "nome", { limit: 6, tbs: "qdr:y" }),
+  const queryNomeC = `site:${slug}.${ufLow}.gov.br secretaria educação secretário`;
+  const [candsNomeA, candsNomeB, candsNomeC] = await Promise.all([
+    gSearch(fc, queryNomeA, emit, "nome", { limit: 8, tbs: "qdr:y", timeoutMs: 8000 }),
+    gSearch(fc, queryNomeB, emit, "nome", { limit: 6, tbs: "qdr:y", timeoutMs: 8000 }),
+    gSearch(fc, queryNomeC, emit, "nome", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 }),
   ]);
-  const candsNome = dedupeByUrl([...candsNomeA, ...candsNomeB]);
+  // Fallback de domínio: se o domínio padrão {slug}.{uf}.gov.br não retornou nada,
+  // tenta {uf}.gov.br com o nome do município.
+  let candsNomeCfb: SearchCandidate[] = [];
+  if (candsNomeC.length === 0) {
+    const queryNomeCfb = `site:${ufLow}.gov.br "${municipio}" secretaria educação secretário`;
+    candsNomeCfb = await gSearch(fc, queryNomeCfb, emit, "nome", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 });
+  }
+  // Priorizar resultados do domínio oficial do município (queryNomeC/fb) ANTES de A/B.
+  const candsNome = dedupeByUrl([...candsNomeC, ...candsNomeCfb, ...candsNomeA, ...candsNomeB]);
   addToPool(candsNome);
   const rankedNome = preferGov(candsNome, (u) => /(educa|secretari)/i.test(u));
   const snippetsNome = snippetsBlock(rankedNome);
