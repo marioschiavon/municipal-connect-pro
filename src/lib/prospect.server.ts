@@ -207,6 +207,10 @@ function rankEmails(emails: string[], municipio: string, uf: string, topHost?: s
     const [local = "", domain = ""] = e.toLowerCase().split("@");
     let s = 0;
     if (EDUCATION_LOCAL.test(`${local}@`) || /(seduc|educa)/i.test(local)) s += 20;
+    // Bônus para local part EXATA (sem ramal/sufixo) — seduc@ > seduc_dir_*@
+    if (/^(seduc|sme|smed|educacao)$/.test(local)) s += 10;
+    // Penalidade para ramais internos: token_edu seguido de underscore (seduc_dir_*, educacao_geral_*)
+    if (/^(seduc|sme|smed|educacao|educa)_/.test(local)) s -= 5;
     if (/^educacao\./i.test(domain)) s += 8;
     if (domain.includes(`${slug}.${ufLow}.gov.br`) || domain.endsWith(`.${slug}.${ufLow}.gov.br`)) s += 6;
     if (domain.endsWith(".gov.br")) s += 3;
