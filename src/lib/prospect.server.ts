@@ -164,12 +164,16 @@ function snippetsBlock(cands: SearchCandidate[]): string {
 }
 
 function preferGov(cands: SearchCandidate[], extra?: (u: string) => boolean): SearchCandidate[] {
+  const OTHER_SECRETARIAS = /(esporte|saude|sa[uú]de|obras|tr[âa]nsito|transito|turismo|cultura|assistencia|assist[êe]ncia|meio[-_.\s]?ambiente|fazenda|planejamento|habitacao|habita[çc][ãa]o|agricultura)/i;
   const score = (c: SearchCandidate) => {
     let s = 0;
+    const blob = `${c.url} ${c.title ?? ""} ${c.description ?? ""}`;
     if (/\.gov\.br/i.test(c.url)) s += 10;
     if (/\.leg\.br/i.test(c.url)) s += 6;
     if (extra && extra(c.url)) s += 5;
     if (c.markdown) s += 2;
+    // Penaliza fortemente páginas claramente de OUTRAS secretarias.
+    if (OTHER_SECRETARIAS.test(blob) && !/(educa|seduc|sme|smed)/i.test(blob)) s -= 8;
     return -s;
   };
   return [...cands].sort((a, b) => score(a) - score(b));
@@ -207,6 +211,10 @@ function rankEmails(emails: string[], municipio: string, uf: string, topHost?: s
     const [local = "", domain = ""] = e.toLowerCase().split("@");
     let s = 0;
     if (EDUCATION_LOCAL.test(`${local}@`) || /(seduc|educa)/i.test(local)) s += 20;
+    // Bônus para local part EXATA (sem ramal/sufixo) — seduc@ > seduc_dir_*@
+    if (/^(seduc|sme|smed|educacao)$/.test(local)) s += 10;
+    // Penalidade para ramais internos: token_edu seguido de underscore (seduc_dir_*, educacao_geral_*)
+    if (/^(seduc|sme|smed|educacao|educa)_/.test(local)) s -= 5;
     if (/^educacao\./i.test(domain)) s += 8;
     if (domain.includes(`${slug}.${ufLow}.gov.br`) || domain.endsWith(`.${slug}.${ufLow}.gov.br`)) s += 6;
     if (domain.endsWith(".gov.br")) s += 3;
@@ -240,22 +248,16 @@ function filterPresent(extracted: Extracted, source: string, municipio?: string,
   const lower = source.toLowerCase();
   let emails = extracted.emails.filter((e) => lower.includes(e.toLowerCase().trim()));
 
-  // Anti-contaminação: descarta e-mails .gov.br de OUTRO município (domínio não
-  // contém slug do município nem a UF). Mantém pelo menos 1 e-mail se for o
-  // único disponível (com confiança baixa pelo chamador).
+  // Anti-contaminação: e-mail .gov.br tem que conter o SLUG do município-alvo
+  // no domínio. Se não contém, é de outro município mesmo dentro da UF correta
+  // (ex.: educacao@santoantoniodaplatina.pr.gov.br aparecendo em busca de Curitiba/PR).
+  // Mantém o suspeito só se for o único e-mail disponível (último recurso).
   if (municipio && uf && emails.length > 0) {
     const slug = slugify(municipio);
-    const ufLow = uf.toLowerCase();
     const isForeignGov = (e: string) => {
       const domain = (e.split("@")[1] ?? "").toLowerCase();
       if (!domain.endsWith(".gov.br")) return false;
-      if (domain.includes(slug)) return false;
-      // domínios típicos: x.{uf}.gov.br — exige que a UF do domínio bata
-      const ufMatch = domain.match(/\.([a-z]{2})\.gov\.br$/);
-      if (ufMatch && ufMatch[1] !== ufLow) return true;
-      // sem UF clara mas sem slug → suspeito
-      if (!ufMatch && !domain.includes(slug)) return true;
-      return false;
+      return !domain.includes(slug);
     };
     const cleaned = emails.filter((e) => !isForeignGov(e));
     if (cleaned.length > 0) emails = cleaned;
@@ -275,9 +277,11 @@ async function scrapeMarkdown(
   url: string,
   emit: Emit,
   etapa: EtapaTag,
+  opts: { timeoutMs?: number } = {},
 ): Promise<string | null> {
   emit("info", etapa, `Baixando ${shortHost(url)} (fetch nativo)...`);
   const native = await fetchHtml(url, {
+    timeoutMs: opts.timeoutMs,
     emit: (msg, data) => emit("info", etapa, msg, data),
   });
   if (native.ok) {
@@ -608,21 +612,36 @@ export async function prospectar(
   }
 
   if (snippetsNome) {
-    let nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
+    const nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
       diarioBlock,
     });
-    // Retry: se confiança baixa, tenta de novo com APENAS snippets de .gov.br
-    if (nomeRes && nomeRes.confianca === "baixa") {
-      const govOnly = rankedNome.filter((c) => /\.gov\.br/i.test(c.url));
-      if (govOnly.length > 0) {
-        const govSnippets = snippetsBlock(govOnly);
-        emit("info", "nome", `Confiança baixa — re-tentando só com ${govOnly.length} snippet(s) .gov.br`);
-        const retry = await extractNomeWithAI(govSnippets, govOnly[0].url, municipio, uf, emit, { diarioBlock });
-        if (retry?.secretario && retry.confianca !== "baixa") nomeRes = retry;
-        else if (retry?.secretario && !nomeRes.secretario) nomeRes = retry;
-      }
-    }
+
+    // ---- Promoção determinística da confiança (não depende da IA) ----
+    // Conta ocorrências literais do nome nos snippets do Google. Se aparecer em
+    // .gov.br do próprio município → "alta". Se aparecer em ≥2 snippets → "media".
+    // Só descarta se confiança ficar "baixa" E o nome não aparecer em nenhum snippet.
+    let confianca: "alta" | "media" | "baixa" = nomeRes?.confianca ?? "baixa";
+    let appearsCount = 0;
+    let appearsInOwnGov = false;
     if (nomeRes?.secretario) {
+      const nomeLow = nomeRes.secretario.toLowerCase().trim();
+      for (const c of rankedNome) {
+        const blob = `${c.title ?? ""} ${c.description ?? ""}`.toLowerCase();
+        if (!blob.includes(nomeLow)) continue;
+        appearsCount += 1;
+        const host = shortHost(c.url).toLowerCase();
+        if (/\.gov\.br$/.test(host) && host.includes(slug)) appearsInOwnGov = true;
+      }
+      if (appearsInOwnGov) confianca = "alta";
+      else if (appearsCount >= 2 && confianca === "baixa") confianca = "media";
+      emit("info", "nome", `Confiança ajustada: IA=${nomeRes.confianca} → ${confianca} (aparições=${appearsCount}, govPróprio=${appearsInOwnGov})`);
+    }
+
+    const aceitaNome = !!nomeRes?.secretario && (confianca !== "baixa" || appearsCount >= 1);
+    if (nomeRes?.secretario && !aceitaNome) {
+      emit("warn", "nome", `Descartando nome "${nomeRes.secretario}" — não aparece em nenhum snippet e confiança baixa`);
+    }
+    if (aceitaNome && nomeRes?.secretario) {
       if (nomeSecretario && nomeRes.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()) {
         emit("warn", "nome", `Conflito: diário=${nomeSecretario} / snippet=${nomeRes.secretario} — adotando snippet (mais atual)`);
       }
@@ -654,7 +673,7 @@ export async function prospectar(
   };
   if (looksLikeSeducPage(topNome)) {
     emit("info", "educacao", `Estágio 1.5 — scrape oportunista de ${topHost}`);
-    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao");
+    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000 });
     if (md) {
       const combined = `### Site\n${md}\n\n### Snippets\n${snippetsBlock(rankedNome)}`;
       const ext = await extractWithAI(combined, topNome!.url, "educacao", municipio, uf, emit, {

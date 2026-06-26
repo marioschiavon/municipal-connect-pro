@@ -17,7 +17,7 @@ export async function fetchHtml(
   url: string,
   opts: { timeoutMs?: number; emit?: FetchEmit } = {},
 ): Promise<FetchResult> {
-  const timeoutMs = opts.timeoutMs ?? 12_000;
+  const timeoutMs = opts.timeoutMs ?? 6_000;
   let currentUrl = url;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
