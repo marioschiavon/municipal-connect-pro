@@ -144,7 +144,7 @@ function decodeEntities(s: string): string {
     .replace(/&([a-zA-Z]+);/g, (m, name: string) => ENTITIES[name] ?? m);
 }
 
-export function htmlToMarkdown(html: string): string {
+export function htmlToMarkdown(html: string, pageUrl?: string): string {
   let s = html;
 
   // Header opcional: title + description
@@ -162,7 +162,18 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<head[\s\S]*?<\/head>/gi, "");
   s = s.replace(/<svg[\s\S]*?<\/svg>/gi, "");
 
-  // Links: <a href="X">txt</a>  → [txt](X)
+  let pageHost: string | null = null;
+  if (pageUrl) {
+    try {
+      pageHost = new URL(pageUrl).host.toLowerCase();
+    } catch {
+      pageHost = null;
+    }
+  }
+
+  // Links: <a href="X">txt</a>  → [txt](X) — mas omite href quando aponta para
+  // outro domínio ou é mailto:, para não contaminar o texto com e-mails/URLs
+  // de outras cidades que enganariam a verificação "literal no source".
   s = s.replace(
     /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
     (_, href: string, txt: string) => {
@@ -170,9 +181,30 @@ export function htmlToMarkdown(html: string): string {
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-      return ` [${cleanTxt || href}](${href}) `;
+      const hrefLow = href.trim().toLowerCase();
+      // mailto / tel — nunca exibe o destino como texto
+      if (hrefLow.startsWith("mailto:") || hrefLow.startsWith("tel:")) {
+        return ` ${cleanTxt} `;
+      }
+      // links externos absolutos: só mostra o texto se houver, senão ignora
+      if (/^https?:\/\//i.test(href)) {
+        if (pageHost) {
+          try {
+            const linkHost = new URL(href).host.toLowerCase();
+            if (linkHost !== pageHost && !linkHost.endsWith(`.${pageHost}`) && !pageHost.endsWith(`.${linkHost}`)) {
+              return ` ${cleanTxt} `;
+            }
+          } catch {
+            return ` ${cleanTxt} `;
+          }
+        }
+        return ` [${cleanTxt || href}](${href}) `;
+      }
+      // links relativos: só o texto (sem href)
+      return ` ${cleanTxt} `;
     },
   );
+
 
   // Quebras de bloco
   s = s.replace(/<\s*br\s*\/?\s*>/gi, "\n");
