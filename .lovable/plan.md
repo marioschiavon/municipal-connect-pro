@@ -1,46 +1,55 @@
-# Plano — Alpha v0.11: Google-first, menos malabarismo
-
 ## Diagnóstico
-Hoje cada município dispara: **3 buscas paralelas com `scrapeOptions` (Firecrawl renderiza markdown de até 5 páginas cada)** + scrape do top + Querido Diário + IA de nome + IA de extração + (estágio B) mais 2 buscas. Cada `search+scrapeOptions` custa caro e demora segundos. E o Querido Diário trava por até 6s mesmo com timeout. Ironicamente, no Google a resposta já aparece no 1º snippet — estamos "escondendo" essa resposta debaixo de scraping pesado.
 
-## Princípio novo
-**Snippet primeiro, scrape só se precisar. Diário só se sobrar tempo.**
+Hoje o Estágio A tenta resolver nome + contato numa única busca/IA. Quando o snippet traz "ouvidoria@", a IA pega esse e-mail e o pipeline encerra como sucesso, sem nunca rodar uma busca dedicada ao contato da Secretaria de Educação.
 
-## Mudanças propostas
+A correção é voltar ao modelo **escalonado de verdade**: primeiro fechar o NOME ATUAL, depois (e só depois) ir atrás do contato em ondas, cada uma mais ampla que a anterior.
 
-### 1. Estágio A enxuto (1 busca, sem scrape)
-- Substituir as 3 buscas paralelas por **uma única** `fc.search` **sem `scrapeOptions`** (só títulos/descrições, ~1 chamada barata, sub-segundo).
-- Query: `secretário(a) de educação ${municipio} ${uf} ${anoAtual}` com `tbs: "qdr:y"`, `limit: 10`.
-- Mandar os 10 snippets direto pra IA pedindo: **nome + e-mail + telefone + dataReferencia** numa só chamada (`extractWithAI` em modo `onlySnippets`).
-- Se IA devolver nome **e** (email ou telefone) com confiança ≥ média → **finaliza aqui**. Esse é o caminho feliz do Maringá.
+## Plano (Alpha v0.12)
 
-### 2. Estágio B só quando faltar contato
-- Se veio só o nome, aí sim faz **uma** busca dirigida `"${nome}" secretaria educação ${municipio} email` (sem scrape) e roda IA nos snippets.
-- Se ainda faltar, **uma** tentativa de scrape do top resultado `.gov.br` da busca A (com `scrapeMarkdown`).
+### Estágio 1 — Nome atual (apenas nome)
+- Busca: `secretário OR secretária de educação {munic} {uf} {ano} atual` (snippet-only, `tbs: qdr:y`).
+- IA com schema reduzido (`{ secretario, cargo, dataReferencia, confianca }`) — proibida de devolver e-mail/telefone aqui.
+- Se Diário Oficial estiver ligado e nome ≤ 365 dias, entra como pista no prompt; conflito → IA prevalece (mantém regra atual).
+- Sai daqui com `nomeSecretario` (pode ser null).
 
-### 3. Querido Diário em background, não-bloqueante
-- Disparar `buscarDiario` em `Promise.race` com timeout de **2s** (não 6s) e **sem bloquear** o estágio A.
-- Só usar o resultado se chegar antes da IA do estágio A terminar. Caso contrário, ignora silenciosamente.
-- Adicionar toggle de UI "Consultar Diário Oficial (mais lento)" — desligado por padrão.
+### Estágio 2 — Contato vinculado ao nome (quando há nome)
+Executar em sequência, parar assim que `hasUsefulContact` for verdadeiro:
 
-### 4. Fallbacks geral/gabinete também sem `scrapeOptions`
-- `runFallback` passa a usar `searchCandidates(..., withScrape=false)`. Só scrapea o top 1 sob demanda se IA-de-snippet não der contato.
+1. `"{nome}" "secretaria de educação" {munic} {uf}` — snippet-only.
+2. `"{nome}" {munic} {uf} (email OR e-mail OR telefone OR contato)` — snippet-only.
+3. Scrape do 1º resultado `.gov.br` (preferindo domínio do município) das duas buscas acima.
 
-### 5. Telemetria de tempo por estágio
-- Cada `emit` ganha `elapsedMs` desde o início; debug page mostra tempo gasto por etapa pra confirmar o ganho.
+### Estágio 3 — Contato institucional da Secretaria (sem o nome)
+1. `"secretaria municipal de educação" {munic} {uf} (email OR contato OR telefone)` — snippet-only.
+2. `secretaria de educação {munic} {uf} site:gov.br` — snippet-only.
+3. `"secretaria de educação" {munic} {uf} site:{slug}.{uf}.leg.br` (Câmara Municipal costuma listar secretários e contatos) — snippet-only.
+4. Scrape do melhor `.gov.br` / `.leg.br`.
 
-### 6. Versão
-- `src/lib/version.ts` → **Alpha v0.11**.
+### Estágio 4 — Fallback institucional (mantém atual)
+Geral da prefeitura → Gabinete do Prefeito (lógica já existente em `prospect.server.ts`, só precisa ser religada depois do Estágio 3).
 
-## Arquivos afetados
-- `src/lib/prospect.server.ts` — reescrita do `prospectar` seguindo o pipeline acima; `searchCandidates` ganha modo "snippet-only" como padrão.
-- `src/lib/querido-diario.server.ts` — timeout interno cai pra 2s; export de função "fire-and-forget".
-- `src/routes/index.tsx` — checkbox "Consultar Diário Oficial".
-- `src/lib/version.ts`.
+### Regras de seleção de e-mail (todos os estágios)
+Helper `rankEmails(emails, municipio, uf)`:
+- Bônus: contém `seduc`, `educacao`, `educa`; domínio bate `{slug}.{uf}.gov.br` ou subdomínio `educacao.*`.
+- Penalidade quando há alternativa: `ouvidoria@`, `faleconosco@`, `falecom@`, `contato@`, `imprensa@`, `gabinete@`, `prefeito@`.
+- Antes do `sendFinal`, ordenar e cortar os penalizados se existir e-mail bom.
 
-## Resultado esperado
-- Caso feliz (Maringá e maioria das capitais): **1 search + 1 IA ≈ 2–4s** total, vs ~15–25s hoje.
-- Custo Firecrawl cai drasticamente (sem `scrapeOptions` na maioria dos municípios).
-- Diário deixa de ser gargalo.
+### Anti-alucinação
+Após cada chamada de IA, filtrar `emails`/`telefones` mantendo apenas os que aparecem literalmente no texto enviado (case-insensitive para e-mail, dígitos normalizados para telefone).
 
-Confirma que sigo por aí? Posso também: (a) manter as 3 buscas mas só do tipo snippet (mais robusto, ainda rápido), ou (b) deixar Diário ligado por padrão mas com timeout de 2s. Me diga se prefere alguma variação antes de eu implementar.
+### Prompt de contato
+Adicionar bloco "REGRAS DE E-MAIL" no `extractWithAI`: priorize Educação (`seduc@`, `educacao@`), evite `ouvidoria/faleconosco/contato/imprensa/gabinete` salvo se únicos, retorne ordenados do mais específico para o mais genérico.
+
+### Telemetria
+Cada estágio emite `emit("info", etapa, "Estágio N — …")` com `elapsedMs` (já existe) para inspecionar no `/debug`.
+
+## Arquivos tocados
+- `src/lib/prospect.server.ts` — reorganizar `prospectar` em estágios 1→4; novo `extractNomeWithAI` (schema só de nome); helper `rankEmails`; validação literal de contato.
+- `src/lib/version.ts` — bump para `Alpha v0.12`.
+
+## Como validar
+Maringá/PR no `/debug`:
+- Estágio 1 fecha com nome atual (Adriana …).
+- Estágio 2.1 já encontra `seduc@maringa.pr.gov.br` no snippet.
+- Resultado final lista `seduc@…` antes de qualquer `ouvidoria@` (ou sem ela).
+- Nenhum contato no resultado que não esteja no texto-fonte.
