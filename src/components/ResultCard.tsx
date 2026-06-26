@@ -36,6 +36,11 @@ const hierBadge: Record<Hierarquia, { label: string; cls: string; dot: string }>
     cls: "bg-emerald-50 text-emerald-700 border-emerald-200",
     dot: "bg-emerald-500",
   },
+  camara: {
+    label: "Câmara Municipal (fallback)",
+    cls: "bg-indigo-50 text-indigo-700 border-indigo-200",
+    dot: "bg-indigo-500",
+  },
   geral: {
     label: "Contato geral da prefeitura (fallback)",
     cls: "bg-amber-50 text-amber-700 border-amber-200",
@@ -232,6 +237,13 @@ export function ResultCard({ municipio, uf, state, slow }: Props) {
               icon={<Phone className="h-4 w-4" />}
               label="Telefone"
               value={result.telefones.join(", ")}
+            />
+          )}
+          {result.horarioAtendimento && (
+            <Field
+              icon={<Clock className="h-4 w-4" />}
+              label="Horário de atendimento"
+              value={result.horarioAtendimento}
             />
           )}
           {result.fonte && (

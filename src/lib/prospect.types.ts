@@ -1,4 +1,4 @@
-export type Hierarquia = "educacao" | "geral" | "gabinete";
+export type Hierarquia = "educacao" | "camara" | "geral" | "gabinete";
 
 export type ProspectResult = {
   status: "found" | "partial" | "not_found";
@@ -14,6 +14,8 @@ export type ProspectResult = {
   nomeFonte?: "site" | "diario" | "busca-nome" | "snippet" | null;
   /** Data/período de referência da informação (ex.: "2025-11", "abril/2025"). */
   dataReferencia?: string | null;
+  /** Horário de atendimento, quando aparece literalmente na fonte (ex.: "Seg a Sex 8h–17h"). */
+  horarioAtendimento?: string | null;
 };
 
 export type ProgressLevel = "info" | "success" | "warn" | "error";
