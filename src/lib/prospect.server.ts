@@ -330,6 +330,9 @@ REGRAS:
 - Snippets do Google geralmente refletem o titular ATUAL — prefira-os ao Diário Oficial quando houver conflito, salvo se o trecho do diário for claramente mais recente.
 - "dataReferencia": data/mês/ano da evidência (ex.: "${anoAtual}-11", "abril/${anoAtual}"); senão null.
 - "confianca" = "alta" só quando o nome ATUAL está claramente identificado.
+- Se encontrar um nome em snippets de domínio ".gov.br" do próprio município, marque confiança como "alta" automaticamente, mesmo que o snippet seja curto.
+- Aceite o nome se ele aparecer ao menos 2 vezes nos snippets combinados, mesmo sem data explícita — nesse caso, confiança "media" ou "alta".
+- Antes de retornar confiança "baixa", releia mentalmente APENAS os snippets de ".gov.br" isolados e tente extrair novamente; só desista se ainda assim não houver evidência clara.
 
 URL: ${url}
 ${diarioBlock}
