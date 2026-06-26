@@ -37,6 +37,7 @@ const ExtractSchema = z.object({
   contexto: z.string().nullable().optional().default(null),
   confianca: ConfiancaLoose.default("baixa"),
   dataReferencia: z.string().nullable().optional().default(null),
+  horarioAtendimento: z.string().nullable().optional().default(null),
 });
 
 // Schema reduzido — usado SOMENTE no Estágio 1 (nome). Sem e-mails/telefones.
@@ -56,6 +57,7 @@ type Extracted = {
   contexto: string | null;
   confianca: "alta" | "media" | "baixa";
   dataReferencia: string | null;
+  horarioAtendimento: string | null;
 };
 
 type NomeOnly = {
@@ -188,10 +190,19 @@ function dedupeByUrl(arr: SearchCandidate[]): SearchCandidate[] {
 // ---- Seleção/ranking de e-mails ----
 const GENERIC_LOCAL = /^(ouvidoria|faleconosco|fale-conosco|falecom|contato|imprensa|gabinete|prefeito|atendimento|protocolo|rh)@/i;
 const EDUCATION_LOCAL = /^(seduc|sme|smed|educacao|educa|secretariadeeducacao|secretaria\.educacao)/i;
+// Escolas/CMEIs/creches/conselhos — NUNCA devem virar contato da Secretaria.
+const SCHOOL_LOCAL = /^(escola|colegio|col[ée]gio|emef|emei|emeif|emeief|cmei|cmeb|cei|creche|biblioteca|cras|cmdca|conselho)/i;
+const SCHOOL_DOMAIN = /(^|\.)(escola|colegio|cmei|emei|emef|creche)\./i;
 
-function rankEmails(emails: string[], municipio: string, uf: string): string[] {
+function isSchoolEmail(e: string): boolean {
+  const [local = "", domain = ""] = e.toLowerCase().split("@");
+  return SCHOOL_LOCAL.test(local) || SCHOOL_DOMAIN.test(domain);
+}
+
+function rankEmails(emails: string[], municipio: string, uf: string, topHost?: string): string[] {
   const slug = slugify(municipio);
   const ufLow = uf.toLowerCase();
+  const topHostLow = (topHost ?? "").toLowerCase();
   const score = (e: string) => {
     const [local = "", domain = ""] = e.toLowerCase().split("@");
     let s = 0;
@@ -199,15 +210,23 @@ function rankEmails(emails: string[], municipio: string, uf: string): string[] {
     if (/^educacao\./i.test(domain)) s += 8;
     if (domain.includes(`${slug}.${ufLow}.gov.br`) || domain.endsWith(`.${slug}.${ufLow}.gov.br`)) s += 6;
     if (domain.endsWith(".gov.br")) s += 3;
+    if (topHostLow && (domain === topHostLow || topHostLow.endsWith(domain) || domain.endsWith(topHostLow))) s += 5;
     if (GENERIC_LOCAL.test(e)) s -= 15;
+    if (isSchoolEmail(e)) s -= 100;
     return -s;
   };
   const uniq = Array.from(new Set(emails.map((e) => e.trim()).filter(Boolean)));
   return uniq.sort((a, b) => score(a) - score(b));
 }
 
-function filterEmailsForFinal(emails: string[], municipio: string, uf: string): string[] {
-  const ranked = rankEmails(emails, municipio, uf);
+/**
+ * Filtra e-mails para o resultado final.
+ * - Remove SEMPRE e-mails de escolas/CMEIs (não são contato da Secretaria).
+ * - Se houver e-mail bom (não-genérico), descarta os genéricos.
+ * Retorna [] se sobrar apenas lixo (chamador então tenta próximo estágio).
+ */
+function filterEmailsForFinal(emails: string[], municipio: string, uf: string, topHost?: string): string[] {
+  const ranked = rankEmails(emails, municipio, uf, topHost).filter((e) => !isSchoolEmail(e));
   const good = ranked.filter((e) => !GENERIC_LOCAL.test(e));
   return good.length > 0 ? good : ranked;
 }
