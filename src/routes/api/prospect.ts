@@ -5,7 +5,9 @@ const Input = z.object({
   municipio: z.string().min(1),
   uf: z.string().length(2),
   ibgeId: z.number().int().positive().optional(),
+  useDiario: z.boolean().optional().default(false),
 });
+
 
 export const Route = createFileRoute("/api/prospect")({
   server: {
@@ -24,7 +26,7 @@ export const Route = createFileRoute("/api/prospect")({
             headers: { "Content-Type": "application/json" },
           });
         }
-        const { municipio, uf, ibgeId } = parsed.data;
+        const { municipio, uf, ibgeId, useDiario } = parsed.data;
 
         const { prospectar } = await import("@/lib/prospect.server");
         const encoder = new TextEncoder();
@@ -35,7 +37,8 @@ export const Route = createFileRoute("/api/prospect")({
               controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
             };
             try {
-              await prospectar(municipio, uf, (evt) => send(evt), ibgeId);
+              await prospectar(municipio, uf, (evt) => send(evt), ibgeId, { useDiario });
+
             } catch (e) {
               send({
                 kind: "progress",

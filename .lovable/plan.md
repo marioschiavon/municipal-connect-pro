@@ -1,59 +1,46 @@
-## Problema
-O Querido Diário pode retornar trechos antigos (até 24 meses) e a IA fica com o nome desatualizado (ex.: Maringá hoje é "Adriana"). Precisamos privilegiar o nome **atual** do(a) Secretário(a) de Educação e marcar a data da evidência.
+# Plano — Alpha v0.11: Google-first, menos malabarismo
 
-## Bump de versão
-- `src/lib/version.ts` → **Alpha v0.10**.
+## Diagnóstico
+Hoje cada município dispara: **3 buscas paralelas com `scrapeOptions` (Firecrawl renderiza markdown de até 5 páginas cada)** + scrape do top + Querido Diário + IA de nome + IA de extração + (estágio B) mais 2 buscas. Cada `search+scrapeOptions` custa caro e demora segundos. E o Querido Diário trava por até 6s mesmo com timeout. Ironicamente, no Google a resposta já aparece no 1º snippet — estamos "escondendo" essa resposta debaixo de scraping pesado.
 
-## Mudanças
+## Princípio novo
+**Snippet primeiro, scrape só se precisar. Diário só se sobrar tempo.**
 
-### 1. Querido Diário — só pista recente (`src/lib/querido-diario.server.ts`)
-- Reduzir janela padrão `sinceDays` de 730 → **180 dias** (últimos 6 meses).
-- Ordenar por `sort_by=descending_date` (em vez de `relevance`) para pegar publicações novas primeiro.
-- Manter `date` em cada `DiarioExcerpt` (já existe) e expor flag `isRecent` (≤ 120 dias).
-- Em `formatExcerptsForPrompt`: deixar a data **destacada** ("📅 2026-04-10") e ordenar do mais novo pro mais antigo; adicionar nota: "Use apenas o trecho MAIS RECENTE como fonte do nome; descarte trechos antigos se forem contraditórios."
+## Mudanças propostas
 
-### 2. Extração de nome do diário (`prospect.server.ts > nomeDoDiario`)
-- Iterar excerpts já ordenados por data desc.
-- Se o trecho mais antigo trouxer nome X e um mais novo trouxer nome Y diferente, ficar com **Y** e logar: "Atualizei nome via diário mais recente (DD/MM/AAAA)".
-- Só adotar `nomeFonte = "diario"` se a data do trecho for ≤ 365 dias; caso contrário, tratar como pista fraca e ainda exigir confirmação por busca.
+### 1. Estágio A enxuto (1 busca, sem scrape)
+- Substituir as 3 buscas paralelas por **uma única** `fc.search` **sem `scrapeOptions`** (só títulos/descrições, ~1 chamada barata, sub-segundo).
+- Query: `secretário(a) de educação ${municipio} ${uf} ${anoAtual}` com `tbs: "qdr:y"`, `limit: 10`.
+- Mandar os 10 snippets direto pra IA pedindo: **nome + e-mail + telefone + dataReferencia** numa só chamada (`extractWithAI` em modo `onlySnippets`).
+- Se IA devolver nome **e** (email ou telefone) com confiança ≥ média → **finaliza aqui**. Esse é o caminho feliz do Maringá.
 
-### 3. Buscas Google focadas em atualidade (`prospect.server.ts`)
-- Estágio A query atual:
-  `prefeitura municipal {municipio} {uf} secretaria de educação secretário nome contato`
-  → trocar por consultas que forçam recência (Firecrawl `search` aceita `tbs`):
-  - Query 1: `"secretário de educação" {municipio} {uf} {anoAtual}` com `tbs: "qdr:y"` (último ano).
-  - Query 2: `secretaria municipal educação {municipio} {uf} "atual" OR "nomeado" OR "empossado"` com `tbs: "qdr:y"`.
-  - Query 3 (fallback amplo, sem filtro): a atual.
-- Concatenar candidatos das três e deduplicar por URL antes de rankear.
-- No estágio B (busca pelo nome): adicionar `tbs: "qdr:y"` também.
+### 2. Estágio B só quando faltar contato
+- Se veio só o nome, aí sim faz **uma** busca dirigida `"${nome}" secretaria educação ${municipio} email` (sem scrape) e roda IA nos snippets.
+- Se ainda faltar, **uma** tentativa de scrape do top resultado `.gov.br` da busca A (com `scrapeMarkdown`).
 
-### 4. Prompts da IA — desempate por recência (`extractNomeWithAI` e `extractWithAI`)
-- Adicionar bloco "REGRAS DE ATUALIDADE":
-  - "Se houver mais de um nome citado como Secretário(a) de Educação, escolha o mais recentemente empossado (palavras-chave: nomeado, empossado, posse, decreto nº ..., data mais recente)."
-  - "Snippets do Google geralmente refletem o(a) titular atual — prefira-os ao Diário Oficial quando houver conflito, a menos que o diário seja claramente mais recente."
-  - "Se houver indicação de exoneração, posse, decreto ou troca, registre em `contexto` a data citada."
-- Adicionar campo opcional `dataReferencia: string | null` no `ExtractSchema`/`NomeSchema` para a IA devolver a data da fonte (ex.: "2025-11", "abril/2025"). Propagar para `ProspectResult` como `dataReferencia` e exibir no `ResultCard` como badge ("atualizado em ...").
+### 3. Querido Diário em background, não-bloqueante
+- Disparar `buscarDiario` em `Promise.race` com timeout de **2s** (não 6s) e **sem bloquear** o estágio A.
+- Só usar o resultado se chegar antes da IA do estágio A terminar. Caso contrário, ignora silenciosamente.
+- Adicionar toggle de UI "Consultar Diário Oficial (mais lento)" — desligado por padrão.
 
-### 5. UI (`src/components/ResultCard.tsx`)
-- Mostrar badge "atualizado em {dataReferencia}" ao lado do nome quando presente.
-- Manter badge existente "via Diário Oficial / snippet / site".
+### 4. Fallbacks geral/gabinete também sem `scrapeOptions`
+- `runFallback` passa a usar `searchCandidates(..., withScrape=false)`. Só scrapea o top 1 sob demanda se IA-de-snippet não der contato.
 
-### 6. Telemetria/debug
-- Logar no `debug-log` cada vez que houver conflito de nomes entre diário e snippet (`emit("warn","nome","Conflito nome: diário=X / snippet=Y — adotando Y por ser mais recente")`).
+### 5. Telemetria de tempo por estágio
+- Cada `emit` ganha `elapsedMs` desde o início; debug page mostra tempo gasto por etapa pra confirmar o ganho.
 
-## Fora de escopo
-- Não mexer no scraper nativo nem no cache (cache continua por município/dia).
-- Não criar tabela de "histórico de secretários".
+### 6. Versão
+- `src/lib/version.ts` → **Alpha v0.11**.
 
-## Diagrama do fluxo de desempate
-```text
-Diário (≤180d, sort=desc) ──┐
-                            ├─► merge + flag "data"
-Google (tbs=qdr:y, "atual")─┘
-                            │
-                            ▼
-                IA com regra: prefira a evidência mais recente
-                            │
-                            ▼
-              ProspectResult { secretario, dataReferencia }
-```
+## Arquivos afetados
+- `src/lib/prospect.server.ts` — reescrita do `prospectar` seguindo o pipeline acima; `searchCandidates` ganha modo "snippet-only" como padrão.
+- `src/lib/querido-diario.server.ts` — timeout interno cai pra 2s; export de função "fire-and-forget".
+- `src/routes/index.tsx` — checkbox "Consultar Diário Oficial".
+- `src/lib/version.ts`.
+
+## Resultado esperado
+- Caso feliz (Maringá e maioria das capitais): **1 search + 1 IA ≈ 2–4s** total, vs ~15–25s hoje.
+- Custo Firecrawl cai drasticamente (sem `scrapeOptions` na maioria dos municípios).
+- Diário deixa de ser gargalo.
+
+Confirma que sigo por aí? Posso também: (a) manter as 3 buscas mas só do tipo snippet (mais robusto, ainda rápido), ou (b) deixar Diário ligado por padrão mas com timeout de 2s. Me diga se prefere alguma variação antes de eu implementar.

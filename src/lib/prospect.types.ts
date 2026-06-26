@@ -35,9 +35,13 @@ export type ProgressEvent =
       message: string;
       data?: unknown;
       ts: number;
+      /** Milissegundos decorridos desde o início da prospecção deste município. */
+      elapsedMs?: number;
     }
   | {
       kind: "final";
       result: ProspectResult;
       ts: number;
+      elapsedMs?: number;
     };
+
