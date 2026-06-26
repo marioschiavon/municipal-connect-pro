@@ -1,4 +1,4 @@
-export type Hierarquia = "educacao" | "geral" | "gabinete";
+export type Hierarquia = "educacao" | "camara" | "geral" | "gabinete";
 
 export type ProspectResult = {
   status: "found" | "partial" | "not_found";
