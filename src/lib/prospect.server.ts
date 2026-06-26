@@ -656,7 +656,7 @@ export async function prospectar(
   };
   if (looksLikeSeducPage(topNome)) {
     emit("info", "educacao", `Estágio 1.5 — scrape oportunista de ${topHost}`);
-    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao");
+    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000 });
     if (md) {
       const combined = `### Site\n${md}\n\n### Snippets\n${snippetsBlock(rankedNome)}`;
       const ext = await extractWithAI(combined, topNome!.url, "educacao", municipio, uf, emit, {
