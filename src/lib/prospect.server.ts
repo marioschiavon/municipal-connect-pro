@@ -458,9 +458,11 @@ function hasUsefulContact(e: Extracted | null): boolean {
 function fonteLabel(etapa: Hierarquia) {
   return etapa === "educacao"
     ? "Secretaria de Educação"
-    : etapa === "geral"
-      ? "Contato geral da prefeitura"
-      : "Gabinete do Prefeito (último recurso)";
+    : etapa === "camara"
+      ? "Câmara Municipal (fallback)"
+      : etapa === "geral"
+        ? "Contato geral da prefeitura"
+        : "Gabinete do Prefeito (último recurso)";
 }
 
 function nomeDoDiario(
