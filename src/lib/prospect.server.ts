@@ -275,9 +275,11 @@ async function scrapeMarkdown(
   url: string,
   emit: Emit,
   etapa: EtapaTag,
+  opts: { timeoutMs?: number } = {},
 ): Promise<string | null> {
   emit("info", etapa, `Baixando ${shortHost(url)} (fetch nativo)...`);
   const native = await fetchHtml(url, {
+    timeoutMs: opts.timeoutMs,
     emit: (msg, data) => emit("info", etapa, msg, data),
   });
   if (native.ok) {
