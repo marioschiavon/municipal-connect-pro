@@ -748,7 +748,7 @@ export async function prospectar(
   };
   if (looksLikeSeducPage(topNome)) {
     emit("info", "educacao", `Estágio 1.5 — scrape oportunista de ${topHost}`);
-    const md = await scrapeMarkdown(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000 });
+    const md = await gScrape(fc, topNome!.url, emit, "educacao", { timeoutMs: 4000, hardTimeoutMs: 4000 });
     if (md) {
       const combined = `### Site\n${md}\n\n### Snippets\n${snippetsBlock(rankedNome)}`;
       const ext = await extractWithAI(combined, topNome!.url, "educacao", municipio, uf, emit, {
@@ -791,7 +791,7 @@ export async function prospectar(
     etapaTag: EtapaTag,
     hierarquia: Hierarquia,
   ): Promise<ProspectResult | null> => {
-    const cands = await googleSearch(fc, query, emit, etapaTag, { limit: 8, tbs: "qdr:y" });
+    const cands = await gSearch(fc, query, emit, etapaTag, { limit: 8, tbs: "qdr:y", timeoutMs: 8000 });
     addToPool(cands);
     if (cands.length === 0) return null;
     const ranked = preferGov(cands, (u) => /(educa|seduc|sme)/i.test(u));
@@ -844,14 +844,14 @@ export async function prospectar(
     if (r2b) return sendFinal(r2b);
 
     const all = dedupeByUrl([
-      ...(await googleSearch(fc, `"${nomeSecretario}" secretaria educação ${municipio} ${uf}`, emit, "contato-secretario", { limit: 5, tbs: "qdr:y" })),
+      ...(await gSearch(fc, `"${nomeSecretario}" secretaria educação ${municipio} ${uf}`, emit, "contato-secretario", { limit: 5, tbs: "qdr:y", timeoutMs: 8000 })),
     ]);
     addToPool(all);
     const rankedAll = preferGov(all, (u) => /(educa|seduc|sme)/i.test(u));
     const topGov = rankedAll.find((c) => /\.gov\.br/i.test(c.url));
     if (topGov) {
       emit("info", "contato-secretario", `Estágio 2.3 — scrape do site oficial (${shortHost(topGov.url)})`);
-      const md = await scrapeMarkdown(fc, topGov.url, emit, "contato-secretario");
+      const md = await gScrape(fc, topGov.url, emit, "contato-secretario", { hardTimeoutMs: 8000 });
       if (md) {
         const combined = `### Site\n${md}`;
         const ext = await extractWithAI(combined, topGov.url, "educacao", municipio, uf, emit, {
@@ -906,14 +906,14 @@ export async function prospectar(
   if (r3b) return sendFinal(r3b);
 
   const all3 = dedupeByUrl([
-    ...(await googleSearch(fc, `secretaria municipal de educação ${municipio} ${uf} contato`, emit, "educacao", { limit: 6 })),
+    ...(await gSearch(fc, `secretaria municipal de educação ${municipio} ${uf} contato`, emit, "educacao", { limit: 6, timeoutMs: 8000 })),
   ]);
   addToPool(all3);
   const ranked3 = preferGov(all3, (u) => /(educa|seduc|sme)/i.test(u));
   const top3 = ranked3.find((c) => /\.gov\.br|\.leg\.br/i.test(c.url)) ?? ranked3[0];
   if (top3) {
     emit("info", "educacao", `Estágio 3.3 — scrape de ${shortHost(top3.url)}`);
-    const md = await scrapeMarkdown(fc, top3.url, emit, "educacao");
+    const md = await gScrape(fc, top3.url, emit, "educacao", { hardTimeoutMs: 8000 });
     if (md) {
       const ext = await extractWithAI(`### Site\n${md}`, top3.url, "educacao", municipio, uf, emit, {
         nomeAlvo: nomeSecretario,
@@ -969,14 +969,14 @@ export async function prospectar(
   // ============================================================
   async function runFallback(etapa: Hierarquia, query: string, label: string): Promise<ProspectResult | null> {
     emit("info", etapa, `${label} — snippet-only`);
-    const cands = await googleSearch(fc, query, emit, etapa, { limit: 8 });
+    const cands = await gSearch(fc, query, emit, etapa, { limit: 8, timeoutMs: 5000 });
     addToPool(cands);
     const ranked = preferGov(cands);
     if (ranked.length === 0) return null;
     const snippets = snippetsBlock(ranked);
     let ext = await extractWithAI(snippets, ranked[0].url, etapa, municipio, uf, emit, { modo: "snippets", topHost });
     if (!ext || !hasUsefulContact(ext)) {
-      const md = await scrapeMarkdown(fc, ranked[0].url, emit, etapa);
+      const md = await gScrape(fc, ranked[0].url, emit, etapa, { hardTimeoutMs: 5000 });
       if (md) {
         const combined = [snippets, `### Site\n${md}`].filter(Boolean).join("\n\n");
         ext = await extractWithAI(combined, ranked[0].url, etapa, municipio, uf, emit, { modo: "site", topHost });
