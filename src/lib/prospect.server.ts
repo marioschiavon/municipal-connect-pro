@@ -608,9 +608,20 @@ export async function prospectar(
   }
 
   if (snippetsNome) {
-    const nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
+    let nomeRes = await extractNomeWithAI(snippetsNome, topNome?.url ?? "(snippets)", municipio, uf, emit, {
       diarioBlock,
     });
+    // Retry: se confiança baixa, tenta de novo com APENAS snippets de .gov.br
+    if (nomeRes && nomeRes.confianca === "baixa") {
+      const govOnly = rankedNome.filter((c) => /\.gov\.br/i.test(c.url));
+      if (govOnly.length > 0) {
+        const govSnippets = snippetsBlock(govOnly);
+        emit("info", "nome", `Confiança baixa — re-tentando só com ${govOnly.length} snippet(s) .gov.br`);
+        const retry = await extractNomeWithAI(govSnippets, govOnly[0].url, municipio, uf, emit, { diarioBlock });
+        if (retry?.secretario && retry.confianca !== "baixa") nomeRes = retry;
+        else if (retry?.secretario && !nomeRes.secretario) nomeRes = retry;
+      }
+    }
     if (nomeRes?.secretario) {
       if (nomeSecretario && nomeRes.secretario.toLowerCase().trim() !== nomeSecretario.toLowerCase().trim()) {
         emit("warn", "nome", `Conflito: diário=${nomeSecretario} / snippet=${nomeRes.secretario} — adotando snippet (mais atual)`);
